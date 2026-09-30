@@ -30,7 +30,7 @@ mod client;
 mod hub;
 mod node;
 
-pub use client::{ClientBuilder, LavalinkClient};
+pub use client::{ClientBuilder, LavalinkClient, MAX_EVENT_CAPACITY};
 pub use node::{Node, NodeStatus};
 
 mod player;

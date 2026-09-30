@@ -8,8 +8,12 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, watch, Notify};
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 
 const DEFAULT_CLIENT_NAME: &str = concat!("larplink/", env!("CARGO_PKG_VERSION"));
+/// Upper bound for `ClientBuilder::event_capacity` (the broadcast channel
+/// preallocates its ring buffer).
+pub const MAX_EVENT_CAPACITY: usize = 1 << 24;
 
 struct ShutdownGuard(watch::Sender<bool>);
 impl Drop for ShutdownGuard {
@@ -47,8 +51,10 @@ impl ClientBuilder {
         self.client_name = n.into();
         self
     }
+    /// Size of the event ring buffer; must be in `1..=MAX_EVENT_CAPACITY`
+    /// (checked by `build`).
     pub fn event_capacity(mut self, n: usize) -> Self {
-        self.event_capacity = n.max(1);
+        self.event_capacity = n;
         self
     }
     pub fn gateway(mut self, g: Arc<dyn VoiceGateway>) -> Self {
@@ -60,6 +66,19 @@ impl ClientBuilder {
     pub async fn build(self) -> Result<LavalinkClient> {
         if self.nodes.is_empty() {
             return Err(Error::Config("at least one node is required".into()));
+        }
+        if !(1..=MAX_EVENT_CAPACITY).contains(&self.event_capacity) {
+            return Err(Error::Config(format!(
+                "event_capacity must be in 1..={MAX_EVENT_CAPACITY}"
+            )));
+        }
+        if HeaderValue::from_str(&self.client_name).is_err() {
+            return Err(Error::Config(
+                "client_name is not a valid header value".into(),
+            ));
+        }
+        for n in &self.nodes {
+            n.validate()?;
         }
         #[cfg(feature = "tls")]
         {

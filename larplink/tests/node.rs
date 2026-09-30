@@ -107,3 +107,87 @@ async fn builder_requires_a_node() {
         .await;
     assert!(matches!(r, Err(Error::Config(_))));
 }
+
+async fn build_with(
+    tweak: impl FnOnce(&mut larplink::NodeConfig),
+    b: impl FnOnce(larplink::ClientBuilder) -> larplink::ClientBuilder,
+) -> larplink::Result<larplink::LavalinkClient> {
+    let mut cfg = larplink::NodeConfig::new("127.0.0.1:1", "pw");
+    tweak(&mut cfg);
+    b(larplink::LavalinkClient::builder(larplink::UserId(1)).node(cfg))
+        .build()
+        .await
+}
+
+fn assert_config_err(r: larplink::Result<larplink::LavalinkClient>, what: &str) {
+    match r {
+        Err(Error::Config(msg)) => assert!(msg.contains(what), "{what}: {msg}"),
+        Err(e) => panic!("{what}: expected Config error, got {e:?}"),
+        Ok(_) => panic!("{what}: expected Config error, got a client"),
+    }
+}
+
+#[tokio::test]
+async fn event_capacity_is_validated() {
+    assert_config_err(
+        build_with(|_| {}, |b| b.event_capacity(0)).await,
+        "event_capacity",
+    );
+    assert_config_err(
+        build_with(|_| {}, |b| b.event_capacity(usize::MAX)).await,
+        "event_capacity",
+    );
+    assert!(build_with(|_| {}, |b| b.event_capacity(1)).await.is_ok());
+}
+
+#[tokio::test]
+async fn ping_settings_are_validated() {
+    assert_config_err(
+        build_with(|c| c.ping_interval = Duration::ZERO, |b| b).await,
+        "ping_interval",
+    );
+    assert_config_err(
+        build_with(
+            |c| {
+                c.ping_interval = Duration::from_secs(10);
+                c.ping_timeout = Duration::from_secs(5);
+            },
+            |b| b,
+        )
+        .await,
+        "ping_timeout",
+    );
+    assert_config_err(
+        build_with(
+            |c| {
+                c.ping_interval = Duration::MAX;
+                c.ping_timeout = Duration::MAX;
+            },
+            |b| b,
+        )
+        .await,
+        "ping_interval",
+    );
+}
+
+#[tokio::test]
+async fn invalid_header_values_are_config_errors_at_build() {
+    assert_config_err(
+        build_with(|c| c.password = "pw\nevil".into(), |b| b).await,
+        "password",
+    );
+    assert_config_err(
+        build_with(|_| {}, |b| b.client_name("bot\r\n")).await,
+        "client_name",
+    );
+    assert_config_err(
+        build_with(|c| c.host = "bad host/ x".into(), |b| b).await,
+        "host",
+    );
+}
+
+#[cfg(not(feature = "tls"))]
+#[tokio::test]
+async fn secure_node_without_tls_feature_is_a_config_error() {
+    assert_config_err(build_with(|c| c.secure = true, |b| b).await, "tls");
+}

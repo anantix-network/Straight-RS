@@ -11,7 +11,7 @@ pub enum Error {
     HttpClient(#[from] hyper_util::client::legacy::Error),
     #[error("websocket error: {0}")]
     // Boxed: tungstenite's error is large and would bloat every `Result`.
-    Ws(Box<tokio_tungstenite::tungstenite::Error>),
+    Ws(#[source] Box<tokio_tungstenite::tungstenite::Error>),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("lavalink error {status} {error}: {message} ({path})")]
@@ -38,5 +38,17 @@ pub enum Error {
 impl From<tokio_tungstenite::tungstenite::Error> for Error {
     fn from(e: tokio_tungstenite::tungstenite::Error) -> Self {
         Self::Ws(Box::new(e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error as _;
+
+    #[test]
+    fn ws_error_keeps_its_source() {
+        let e = Error::from(tokio_tungstenite::tungstenite::Error::ConnectionClosed);
+        assert!(e.source().is_some());
     }
 }
