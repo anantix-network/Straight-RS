@@ -2,7 +2,7 @@ use crate::balancer::Strategy;
 use crate::hub::Hub;
 use crate::node::Node;
 use crate::{Error, Event, NodeConfig, Result, VoiceGateway};
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use larplink_model::{LoadResult, Track, UserId};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
@@ -62,6 +62,7 @@ impl ClientBuilder {
             client_name: self.client_name,
             nodes,
             players: DashMap::new(),
+            stale: DashSet::new(),
             events,
             strategy: self.strategy,
             rr: AtomicUsize::new(0),
