@@ -294,7 +294,7 @@ impl Hub {
                     .rest()
                     .update_player(&sid, p.guild, &upd, false)
                     .await?;
-                p.apply_player(&resp);
+                p.apply_player(resp);
                 p.mark_written(node.index, gen);
                 if let Some(vs) = upd.voice {
                     lock(&p.voice).mark_sent(vs);

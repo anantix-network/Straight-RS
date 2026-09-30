@@ -45,7 +45,8 @@ async fn stop_pause_seek_volume_filters() {
         ..Default::default()
     };
     p.set_filters(f.clone()).await.unwrap();
-    assert_eq!(p.snapshot().filters, f);
+    assert_eq!(*p.snapshot().filters, f);
+    assert_eq!(*p.filters(), f);
     p.stop().await.unwrap();
     assert!(p.track().is_none());
     let bodies: Vec<_> = mock

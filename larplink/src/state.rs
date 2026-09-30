@@ -1,6 +1,6 @@
 use crate::position::interpolate;
 use crate::voice::VoiceAssembler;
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, Guard};
 use larplink_model::{
     self as model, Filters, GuildId, PlayerState, Track, UpdatePlayer, UpdateTrack,
 };
@@ -19,7 +19,8 @@ pub struct PlayerSnapshot {
     pub track: Option<Arc<Track>>,
     pub paused: bool,
     pub volume: u16,
-    pub filters: Filters,
+    /// Shared: cloning a snapshot (every `playerUpdate`) does not copy filters.
+    pub filters: Arc<Filters>,
     /// Position in ms as last reported by the node (see `position_now`).
     pub position: u64,
     pub connected: bool,
@@ -33,7 +34,7 @@ impl Default for PlayerSnapshot {
             track: None,
             paused: false,
             volume: 100,
-            filters: Filters::default(),
+            filters: Arc::default(),
             position: 0,
             connected: false,
             ping: -1,
@@ -135,6 +136,11 @@ impl PlayerInner {
         self.snapshot.load_full()
     }
 
+    /// Cheap borrow of the current snapshot for synchronous getters.
+    pub(crate) fn load(&self) -> Guard<Arc<PlayerSnapshot>> {
+        self.snapshot.load()
+    }
+
     pub(crate) fn apply_update(&self, st: &PlayerState) {
         self.snapshot.rcu(|cur| {
             let mut n = PlayerSnapshot::clone(cur);
@@ -146,12 +152,12 @@ impl PlayerInner {
         });
     }
 
-    pub(crate) fn apply_player(&self, p: &model::Player) {
+    pub(crate) fn apply_player(&self, p: model::Player) {
         self.snapshot.store(Arc::new(PlayerSnapshot {
-            track: p.track.clone().map(Arc::new),
+            track: p.track.map(Arc::new),
             paused: p.paused,
             volume: p.volume,
-            filters: p.filters.clone(),
+            filters: Arc::new(p.filters),
             position: p.state.position,
             connected: p.state.connected,
             ping: p.state.ping,
@@ -189,7 +195,7 @@ impl PlayerInner {
         }
         upd.paused = Some(s.paused);
         upd.volume = Some(s.volume);
-        upd.filters = Some(s.filters.clone());
+        upd.filters = Some(Filters::clone(&s.filters));
         upd.voice = voice;
         Some(upd)
     }
@@ -244,7 +250,7 @@ mod tests {
     #[test]
     fn apply_player_and_update() {
         let p = PlayerInner::new(GuildId(1));
-        p.apply_player(&model_player(Some(track("A", 10_000, false)), 100, false));
+        p.apply_player(model_player(Some(track("A", 10_000, false)), 100, false));
         let s = p.snapshot();
         assert_eq!(
             (s.volume, s.paused, s.position, s.ping),
@@ -264,20 +270,20 @@ mod tests {
     #[test]
     fn position_now_respects_pause_disconnect_and_no_track() {
         let p = PlayerInner::new(GuildId(1));
-        p.apply_player(&model_player(Some(track("A", 10_000, false)), 1_000, true));
+        p.apply_player(model_player(Some(track("A", 10_000, false)), 1_000, true));
         std::thread::sleep(std::time::Duration::from_millis(30));
         assert_eq!(p.snapshot().position_now(), 1_000);
-        p.apply_player(&model_player(None, 0, false));
+        p.apply_player(model_player(None, 0, false));
         std::thread::sleep(std::time::Duration::from_millis(30));
         assert_eq!(p.snapshot().position_now(), 0);
-        p.apply_player(&model_player(Some(track("A", 10_000, false)), 1_000, false));
+        p.apply_player(model_player(Some(track("A", 10_000, false)), 1_000, false));
         std::thread::sleep(std::time::Duration::from_millis(30));
         assert!(p.snapshot().position_now() >= 1_030);
     }
     #[test]
     fn clear_track_only_when_encoded_matches() {
         let p = PlayerInner::new(GuildId(1));
-        p.apply_player(&model_player(Some(track("A", 1, false)), 0, false));
+        p.apply_player(model_player(Some(track("A", 1, false)), 0, false));
         p.clear_track_if("B");
         assert!(p.snapshot().track.is_some());
         p.clear_track_if("A");
@@ -287,7 +293,7 @@ mod tests {
     fn restore_payload_contains_track_position_filters_voice() {
         let p = PlayerInner::new(GuildId(1));
         assert!(p.restore_payload().is_none());
-        p.apply_player(&model_player(Some(track("A", 100_000, false)), 2_000, true));
+        p.apply_player(model_player(Some(track("A", 100_000, false)), 2_000, true));
         lock(&p.voice).set(&VoiceState {
             token: "t".into(),
             endpoint: "e".into(),
@@ -319,11 +325,7 @@ mod tests {
     #[test]
     fn prepare_merges_restore_state_only_after_a_session_change() {
         let p = PlayerInner::new(GuildId(1));
-        p.apply_player(&model_player(
-            Some(track("A", 100_000, false)),
-            2_000,
-            false,
-        ));
+        p.apply_player(model_player(Some(track("A", 100_000, false)), 2_000, false));
         let vol = UpdatePlayer {
             volume: Some(5),
             ..Default::default()
@@ -354,7 +356,7 @@ mod tests {
     #[test]
     fn restore_payload_skips_position_for_streams() {
         let p = PlayerInner::new(GuildId(1));
-        p.apply_player(&model_player(Some(track("S", 0, true)), 2_000, false));
+        p.apply_player(model_player(Some(track("S", 0, true)), 2_000, false));
         assert!(p.restore_payload().unwrap().position.is_none());
     }
 }

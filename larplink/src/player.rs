@@ -68,16 +68,20 @@ impl Player {
     }
     /// Interpolated position in ms; never awaits.
     pub fn position(&self) -> u64 {
-        self.inner.snapshot().position_now()
+        self.inner.load().position_now()
     }
     pub fn track(&self) -> Option<Arc<Track>> {
-        self.inner.snapshot().track.clone()
+        self.inner.load().track.clone()
     }
     pub fn is_paused(&self) -> bool {
-        self.inner.snapshot().paused
+        self.inner.load().paused
     }
     pub fn volume(&self) -> u16 {
-        self.inner.snapshot().volume
+        self.inner.load().volume
+    }
+    /// Current filters (shared, not copied).
+    pub fn filters(&self) -> Arc<Filters> {
+        self.inner.load().filters.clone()
     }
     pub fn node_index(&self) -> Option<usize> {
         self.inner.node_index()
@@ -134,7 +138,7 @@ impl Player {
             .rest()
             .update_player(&sid, self.inner.guild, &upd, no_replace)
             .await?;
-        self.inner.apply_player(&resp);
+        self.inner.apply_player(resp);
         self.inner.mark_written(node.index, gen);
         if let Some(vs) = upd.voice {
             // Only after success, so a failed PATCH is retried by the next

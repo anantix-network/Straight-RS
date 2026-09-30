@@ -37,3 +37,29 @@ mod player;
 
 pub use player::{Player, PlayerEvents};
 pub mod adapters;
+
+/// Benchmark support; not part of the public API and may change at any time.
+#[doc(hidden)]
+pub mod __bench {
+    use crate::model::{Player, PlayerState};
+    use crate::state::PlayerInner;
+
+    /// The per-player state cell behind `Player`, for benchmarking the
+    /// `playerUpdate` hot path.
+    pub struct PlayerCell(PlayerInner);
+
+    impl PlayerCell {
+        pub fn new(p: &Player) -> Self {
+            let inner = PlayerInner::new(p.guild_id);
+            inner.apply_player(p.clone());
+            Self(inner)
+        }
+        /// What a `playerUpdate` frame does to the player.
+        pub fn apply_update(&self, st: &PlayerState) {
+            self.0.apply_update(st);
+        }
+        pub fn position(&self) -> u64 {
+            self.0.load().position_now()
+        }
+    }
+}
