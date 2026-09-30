@@ -25,3 +25,10 @@ pub use event::Event;
 pub use gateway::{BoxFuture, VoiceGateway};
 pub use state::PlayerSnapshot;
 pub use voice::{VoiceOutcome, VoiceServerUpdate, VoiceStateUpdate};
+
+mod client;
+mod hub;
+mod node;
+
+pub use client::{ClientBuilder, LavalinkClient};
+pub use node::{Node, NodeStatus};

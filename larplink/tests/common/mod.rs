@@ -256,3 +256,44 @@ pub async fn eventually(timeout: Duration, mut f: impl FnMut() -> bool) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+use larplink::{Event, LavalinkClient, NodeConfig, UserId};
+use tokio::sync::broadcast::error::RecvError;
+
+pub async fn client(mocks: &[&Mock]) -> LavalinkClient {
+    client_with(mocks, |_| {}).await
+}
+
+pub async fn client_with(mocks: &[&Mock], tweak: impl Fn(&mut NodeConfig)) -> LavalinkClient {
+    let mut b = LavalinkClient::builder(UserId(1));
+    for m in mocks {
+        let mut cfg = NodeConfig::new(m.host(), "pw");
+        cfg.request_timeout = Duration::from_secs(3);
+        tweak(&mut cfg);
+        b = b.node(cfg);
+    }
+    let c = b.build().await.unwrap();
+    c.wait_ready(Duration::from_secs(5)).await.unwrap();
+    eventually(Duration::from_secs(5), || c.nodes().iter().all(|n| n.is_ready())).await;
+    c
+}
+
+pub async fn next_event(rx: &mut broadcast::Receiver<Event>, pred: impl Fn(&Event) -> bool) -> Event {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rx.recv().await {
+                Ok(e) if pred(&e) => return e,
+                Ok(_) | Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => panic!("event channel closed"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for event")
+}
+
+pub fn sample_track(encoded: &str) -> larplink::Track {
+    serde_json::from_value(track_json(encoded)).unwrap()
+}
+
+pub const STATS_10: &str = r#"{"op":"stats","players":10,"playingPlayers":5,"uptime":1000,"memory":{"free":1,"used":2,"allocated":3,"reservable":4},"cpu":{"cores":4,"systemLoad":0.0,"lavalinkLoad":0.0},"frameStats":null}"#;
