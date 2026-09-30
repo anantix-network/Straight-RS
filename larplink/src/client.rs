@@ -2,12 +2,10 @@ use crate::balancer::Strategy;
 use crate::hub::Hub;
 use crate::node::Node;
 use crate::{Error, Event, NodeConfig, Result, VoiceGateway};
-use dashmap::{DashMap, DashSet};
 use larplink_model::{LoadResult, Track, UserId};
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, watch, Notify};
+use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 
 const DEFAULT_CLIENT_NAME: &str = concat!("larplink/", env!("CARGO_PKG_VERSION"));
@@ -15,10 +13,11 @@ const DEFAULT_CLIENT_NAME: &str = concat!("larplink/", env!("CARGO_PKG_VERSION")
 /// preallocates its ring buffer).
 pub const MAX_EVENT_CAPACITY: usize = 1 << 24;
 
-struct ShutdownGuard(watch::Sender<bool>);
+/// Closes the hub when the last `LavalinkClient` clone is dropped.
+struct ShutdownGuard(Arc<Hub>);
 impl Drop for ShutdownGuard {
     fn drop(&mut self) {
-        let _ = self.0.send(true);
+        self.0.close();
     }
 }
 
@@ -26,7 +25,8 @@ impl Drop for ShutdownGuard {
 #[derive(Clone)]
 pub struct LavalinkClient {
     pub(crate) hub: Arc<Hub>,
-    guard: Arc<ShutdownGuard>,
+    /// Held only for its `Drop`.
+    _guard: Arc<ShutdownGuard>,
 }
 
 pub struct ClientBuilder {
@@ -91,25 +91,20 @@ impl ClientBuilder {
             .map(|(i, cfg)| Node::new(i, cfg, &self.client_name))
             .collect();
         let (events, _) = broadcast::channel(self.event_capacity);
-        let hub = Arc::new(Hub {
-            user_id: self.user_id,
-            client_name: self.client_name,
+        let hub = Arc::new(Hub::new(
+            self.user_id,
+            self.client_name,
             nodes,
-            players: DashMap::new(),
-            stale: DashSet::new(),
             events,
-            strategy: self.strategy,
-            rr: AtomicUsize::new(0),
-            ready: Notify::new(),
-            gateway: self.gateway,
-        });
-        let (tx, rx) = watch::channel(false);
+            self.strategy,
+            self.gateway,
+        ));
         for node in &hub.nodes {
-            tokio::spawn(node.clone().run(hub.clone(), rx.clone()));
+            tokio::spawn(node.clone().run(hub.clone()));
         }
         Ok(LavalinkClient {
+            _guard: Arc::new(ShutdownGuard(hub.clone())),
             hub,
-            guard: Arc::new(ShutdownGuard(tx)),
         })
     }
 }
@@ -138,6 +133,9 @@ impl LavalinkClient {
     pub async fn wait_ready(&self, timeout: Duration) -> Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
+            if self.hub.is_closed() {
+                return Err(Error::Closed);
+            }
             let notified = self.hub.ready.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
@@ -150,35 +148,33 @@ impl LavalinkClient {
         }
     }
 
+    /// A ready node for a one-off REST call.
+    fn any_node(&self) -> Result<Arc<Node>> {
+        if self.hub.is_closed() {
+            return Err(Error::Closed);
+        }
+        self.hub.pick_node(None).ok_or(Error::NoNode)
+    }
+
     pub async fn load(&self, identifier: &str) -> Result<LoadResult> {
-        self.hub
-            .pick_node(None)
-            .ok_or(Error::NoNode)?
-            .rest()
-            .load_tracks(identifier)
-            .await
+        self.any_node()?.rest().load_tracks(identifier).await
     }
 
     pub async fn decode_track(&self, encoded: &str) -> Result<Track> {
-        self.hub
-            .pick_node(None)
-            .ok_or(Error::NoNode)?
-            .rest()
-            .decode_track(encoded)
-            .await
+        self.any_node()?.rest().decode_track(encoded).await
     }
 
     pub async fn decode_tracks(&self, encoded: &[String]) -> Result<Vec<Track>> {
-        self.hub
-            .pick_node(None)
-            .ok_or(Error::NoNode)?
-            .rest()
-            .decode_tracks(encoded)
-            .await
+        self.any_node()?.rest().decode_tracks(encoded).await
     }
 
-    /// Stops all node tasks immediately.
+    /// Stops the client: closes every node connection, cancels pending
+    /// failover/restore work, and makes every `Player` handle (and further
+    /// calls on this client) fail with `Error::Closed`. Nodes report
+    /// `NodeStatus::Disconnected` from here on. Dropping the last clone of the
+    /// client has the same effect. Players are not destroyed on the server;
+    /// Lavalink drops them when the session times out.
     pub fn shutdown(&self) {
-        let _ = self.guard.0.send(true);
+        self.hub.close();
     }
 }

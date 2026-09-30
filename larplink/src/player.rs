@@ -105,6 +105,9 @@ impl Player {
     /// `no_replace = true` keeps the current track if one is playing.
     pub async fn update_with(&self, upd: UpdatePlayer, no_replace: bool) -> Result<()> {
         let _gate = self.inner.gate.lock().await;
+        if self.hub.is_closed() {
+            return Err(Error::Closed);
+        }
         if self.inner.destroyed.load(Ordering::Acquire) {
             return Err(Error::PlayerNotFound);
         }
@@ -193,6 +196,9 @@ impl Player {
     }
 
     async fn destroy_remote(&self, guild: GuildId) -> Result<()> {
+        if self.hub.is_closed() {
+            return Err(Error::Closed);
+        }
         let Some(node) = self.inner.node_index().and_then(|i| self.hub.nodes.get(i)) else {
             return Ok(());
         };

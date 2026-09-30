@@ -221,3 +221,26 @@ async fn destroyed_player_is_not_resurrected_when_node_returns() {
         assert!(!matches!(e, Event::PlayerMigrated { .. }));
     }
 }
+
+#[tokio::test]
+async fn pending_failover_timer_does_not_migrate_after_shutdown() {
+    let (a, b) = (Mock::start().await, Mock::start().await);
+    let c = client_with(&[&a, &b], |cfg| {
+        cfg.failover_grace = Duration::from_millis(300)
+    })
+    .await;
+    let p = join_and_play(&c).await;
+    let mut rx = c.events();
+    a.kill();
+    next_event(&mut rx, |e| {
+        matches!(e, Event::NodeDisconnected { node: 0 })
+    })
+    .await;
+    c.shutdown(); // the failover timer of node 0 is still pending
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert!(b.requests_matching("PATCH", G).is_empty());
+    assert_eq!(p.node_index(), Some(0));
+    while let Ok(e) = rx.try_recv() {
+        assert!(!matches!(e, Event::PlayerMigrated { .. }));
+    }
+}

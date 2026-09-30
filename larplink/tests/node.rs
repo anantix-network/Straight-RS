@@ -191,3 +191,45 @@ async fn invalid_header_values_are_config_errors_at_build() {
 async fn secure_node_without_tls_feature_is_a_config_error() {
     assert_config_err(build_with(|c| c.secure = true, |b| b).await, "tls");
 }
+
+#[tokio::test]
+async fn shutdown_stops_the_client_and_its_players() {
+    let mock = Mock::start().await;
+    let c = client(&[&mock]).await;
+    let p = c.player(larplink::GuildId(42));
+    p.play(&sample_track("ABC")).await.unwrap();
+    c.shutdown();
+    assert!(!c.nodes()[0].is_ready());
+    assert!(c.nodes()[0].session_id().is_none());
+    let before = mock.requests().len();
+    assert!(matches!(p.set_volume(5).await.unwrap_err(), Error::Closed));
+    assert!(matches!(c.load("x").await.unwrap_err(), Error::Closed));
+    assert!(matches!(
+        c.player(larplink::GuildId(43))
+            .play(&sample_track("A"))
+            .await
+            .unwrap_err(),
+        Error::Closed
+    ));
+    assert!(matches!(p.destroy().await.unwrap_err(), Error::Closed));
+    assert!(matches!(p.fetch().await.unwrap_err(), Error::Closed));
+    assert!(matches!(
+        c.wait_ready(Duration::from_millis(50)).await.unwrap_err(),
+        Error::Closed
+    ));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(mock.requests().len(), before, "no requests after shutdown");
+    assert!(!c.nodes()[0].is_ready());
+}
+
+#[tokio::test]
+async fn dropping_the_last_client_closes_player_handles() {
+    let mock = Mock::start().await;
+    let c = client(&[&mock]).await;
+    let p = c.player(larplink::GuildId(42));
+    p.play(&sample_track("ABC")).await.unwrap();
+    let before = mock.requests().len();
+    drop(c);
+    assert!(matches!(p.pause(true).await.unwrap_err(), Error::Closed));
+    assert_eq!(mock.requests().len(), before);
+}

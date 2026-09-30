@@ -4,9 +4,9 @@ use crate::state::PlayerInner;
 use crate::{Error, Event, Result, TrackEndReason, VoiceGateway};
 use dashmap::{DashMap, DashSet};
 use larplink_model::{GuildId, UserId, WsMessage};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::{broadcast, watch, Notify};
 
 /// State a player must still be in (checked under its gate) for `restore_to` to act.
 #[derive(Clone, Copy)]
@@ -38,9 +38,68 @@ pub(crate) struct Hub {
     pub(crate) rr: AtomicUsize,
     pub(crate) ready: Notify,
     pub(crate) gateway: Option<Arc<dyn VoiceGateway>>,
+    /// Set once by `close`; every entry point refuses work afterwards.
+    closed: AtomicBool,
+    /// Flips to `true` on close; background tasks select on it.
+    shutdown: watch::Sender<bool>,
 }
 
 impl Hub {
+    pub(crate) fn new(
+        user_id: UserId,
+        client_name: String,
+        nodes: Vec<Arc<Node>>,
+        events: broadcast::Sender<Event>,
+        strategy: Strategy,
+        gateway: Option<Arc<dyn VoiceGateway>>,
+    ) -> Self {
+        Self {
+            user_id,
+            client_name,
+            nodes,
+            players: DashMap::new(),
+            stale: DashSet::new(),
+            events,
+            strategy,
+            rr: AtomicUsize::new(0),
+            ready: Notify::new(),
+            gateway,
+            closed: AtomicBool::new(false),
+            shutdown: watch::channel(false).0,
+        }
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    /// Stops the client: refuses further work, stops background tasks and
+    /// marks every node disconnected. Idempotent.
+    pub(crate) fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.shutdown.send_replace(true);
+        for n in &self.nodes {
+            n.shut_down();
+        }
+    }
+
+    /// Resolves once the client is closed.
+    pub(crate) async fn closed(&self) {
+        let mut rx = self.shutdown.subscribe();
+        // Err only if the sender is gone, which cannot happen while `self` lives.
+        let _ = rx.wait_for(|c| *c).await;
+    }
+
+    /// Runs `fut` unless (or until) the client closes.
+    pub(crate) async fn unless_closed<F: std::future::Future<Output = ()>>(&self, fut: F) {
+        if self.is_closed() {
+            return;
+        }
+        tokio::select! {
+            _ = self.closed() => {}
+            _ = fut => {}
+        }
+    }
     pub(crate) fn emit(&self, ev: Event) {
         // Err only means "no receivers"; that is fine.
         let _ = self.events.send(ev);
@@ -63,6 +122,9 @@ impl Hub {
 
     /// The node a player should talk to; assigns one on first use.
     pub(crate) fn node_for(&self, p: &PlayerInner) -> Result<Arc<Node>> {
+        if self.is_closed() {
+            return Err(Error::Closed);
+        }
         match p.node_index() {
             Some(i) => {
                 let n = self.nodes.get(i).ok_or(Error::NoNode)?;
@@ -87,29 +149,41 @@ impl Hub {
 
     pub(crate) fn node_ready(self: &Arc<Self>, node: &Arc<Node>, resumed: bool) {
         node.bump_epoch(); // cancels a pending failover timer
+        if self.is_closed() {
+            return;
+        }
         self.emit(Event::NodeConnected { node: node.index });
         self.ready.notify_waiters();
         let hub = self.clone();
         let node = node.clone();
         tokio::spawn(async move {
-            hub.cleanup_stale(&node, resumed).await;
-            if !resumed {
-                hub.restore_players(&node).await;
-            }
-            hub.rescue_orphans(&node).await;
+            hub.unless_closed(async {
+                hub.cleanup_stale(&node, resumed).await;
+                if !resumed {
+                    hub.restore_players(&node).await;
+                }
+                hub.rescue_orphans(&node).await;
+            })
+            .await;
         });
     }
 
     pub(crate) fn node_down(self: &Arc<Self>, node: &Arc<Node>) {
         let epoch = node.bump_epoch();
+        if self.is_closed() {
+            return;
+        }
         self.emit(Event::NodeDisconnected { node: node.index });
         let hub = self.clone();
         let node = node.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(node.cfg.failover_grace).await;
-            if node.epoch() == epoch && !node.is_ready() {
-                hub.migrate_from(node.index, epoch).await;
-            }
+            hub.unless_closed(async {
+                tokio::time::sleep(node.cfg.failover_grace).await;
+                if node.epoch() == epoch && !node.is_ready() {
+                    hub.migrate_from(node.index, epoch).await;
+                }
+            })
+            .await;
         });
     }
 
@@ -163,7 +237,7 @@ impl Hub {
         expect: Expect,
     ) -> Result<Restored> {
         let _gate = p.gate.lock().await;
-        if !self.expected(p, node.index, expect) {
+        if self.is_closed() || !self.expected(p, node.index, expect) {
             return Ok(Restored::Skipped);
         }
         let from = p.node_index();
@@ -218,6 +292,9 @@ impl Hub {
 
     /// Server lost our session: put every player of `node` back.
     pub(crate) async fn restore_players(&self, node: &Arc<Node>) {
+        if self.is_closed() {
+            return;
+        }
         let idx = node.index;
         for p in self
             .players_where(|p| p.node_index() == Some(idx) && !p.orphaned.load(Ordering::Acquire))
@@ -231,6 +308,9 @@ impl Hub {
     /// Node stayed down past the grace period: move its players elsewhere.
     pub(crate) async fn migrate_from(self: &Arc<Self>, idx: usize, epoch: u64) {
         for p in self.players_where(|p| p.node_index() == Some(idx)) {
+            if self.is_closed() {
+                return;
+            }
             match self.nodes.get(idx) {
                 Some(n) if n.epoch() == epoch && !n.is_ready() => {}
                 _ => return, // node came back (or flapped): stop moving players
@@ -263,6 +343,9 @@ impl Hub {
     /// A node became ready: adopt players that had nowhere to go.
     pub(crate) async fn rescue_orphans(&self, node: &Arc<Node>) {
         for p in self.players_where(|p| p.orphaned.load(Ordering::Acquire)) {
+            if self.is_closed() {
+                return;
+            }
             match self.restore_to(&p, node, Expect::Rescue).await {
                 Ok(Restored::Skipped) => {}
                 Ok(Restored::Moved { from }) => {
@@ -320,18 +403,14 @@ mod tests {
         let nodes = (0..2)
             .map(|i| Node::new(i, NodeConfig::new("127.0.0.1:1", "pw"), "test"))
             .collect();
-        Arc::new(Hub {
-            user_id: UserId(1),
-            client_name: "test".into(),
+        Arc::new(Hub::new(
+            UserId(1),
+            "test".into(),
             nodes,
-            players: DashMap::new(),
-            stale: DashSet::new(),
-            events: broadcast::channel(16).0,
-            strategy: Strategy::default(),
-            rr: AtomicUsize::new(0),
-            ready: Notify::new(),
-            gateway: None,
-        })
+            broadcast::channel(16).0,
+            Strategy::default(),
+            None,
+        ))
     }
 
     /// Give `p` a restore payload. The test nodes have no session, so any

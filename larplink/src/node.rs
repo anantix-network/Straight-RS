@@ -9,7 +9,7 @@ use larplink_model::{Info, RoutePlannerStatus, SessionUpdate, Stats, WsMessage};
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering::*};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{watch, OnceCell};
+use tokio::sync::OnceCell;
 use tokio::time::Instant;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -122,22 +122,33 @@ impl Node {
         self.rest.free_all().await
     }
 
+    /// Client closed: forget the session and report disconnected for good.
+    pub(crate) fn shut_down(&self) {
+        self.set_status(NodeStatus::Disconnected);
+        self.session_id.store(None);
+    }
+
     /// Connection loop: connect, read, reconnect with backoff, until shutdown.
-    pub(crate) async fn run(self: Arc<Self>, hub: Arc<Hub>, mut shutdown: watch::Receiver<bool>) {
+    pub(crate) async fn run(self: Arc<Self>, hub: Arc<Hub>) {
+        self.run_until_closed(&hub).await;
+        self.shut_down();
+    }
+
+    async fn run_until_closed(self: &Arc<Self>, hub: &Arc<Hub>) {
         let mut backoff = Backoff::new(Duration::from_millis(500), Duration::from_secs(30));
         loop {
-            if *shutdown.borrow() {
+            if hub.is_closed() {
                 return;
             }
             self.set_status(NodeStatus::Connecting);
             let outcome = tokio::select! {
-                r = self.session(&hub, &mut backoff) => r,
-                _ = shutdown.changed() => return,
+                r = self.session(hub, &mut backoff) => r,
+                _ = hub.closed() => return,
             };
             let was_ready = self.is_ready();
             self.set_status(NodeStatus::Disconnected);
             if was_ready {
-                hub.node_down(&self);
+                hub.node_down(self);
             }
             match outcome {
                 Ok(()) => tracing::info!(node = self.index, "lavalink socket closed"),
@@ -146,7 +157,7 @@ impl Node {
             let delay = backoff.next_delay(rand::random::<f64>());
             tokio::select! {
                 _ = tokio::time::sleep(delay) => {}
-                _ = shutdown.changed() => return,
+                _ = hub.closed() => return,
             }
         }
     }
@@ -195,11 +206,12 @@ impl Node {
 
     fn on_text(self: &Arc<Self>, hub: &Arc<Hub>, backoff: &mut Backoff, text: &str) {
         match WsMessage::parse(text) {
+            Ok(WsMessage::Ready(_)) if hub.is_closed() => {}
             Ok(WsMessage::Ready(r)) => {
                 self.session_id.store(Some(Arc::new(r.session_id.clone())));
                 self.set_status(NodeStatus::Ready);
                 backoff.reset();
-                self.enable_resume(r.session_id.clone());
+                self.enable_resume(hub, r.session_id.clone());
                 hub.emit(Event::Ready {
                     node: self.index,
                     resumed: r.resumed,
@@ -222,16 +234,20 @@ impl Node {
         }
     }
 
-    fn enable_resume(self: &Arc<Self>, session: String) {
+    fn enable_resume(self: &Arc<Self>, hub: &Arc<Hub>, session: String) {
         let node = self.clone();
+        let hub = hub.clone();
         tokio::spawn(async move {
-            let upd = SessionUpdate {
-                resuming: Some(true),
-                timeout: Some(node.cfg.resume_timeout_secs),
-            };
-            if let Err(e) = node.rest.update_session(&session, &upd).await {
-                tracing::warn!(node = node.index, error = %e, "failed to enable session resuming");
-            }
+            hub.unless_closed(async {
+                let upd = SessionUpdate {
+                    resuming: Some(true),
+                    timeout: Some(node.cfg.resume_timeout_secs),
+                };
+                if let Err(e) = node.rest.update_session(&session, &upd).await {
+                    tracing::warn!(node = node.index, error = %e, "failed to enable session resuming");
+                }
+            })
+            .await;
         });
     }
 }
