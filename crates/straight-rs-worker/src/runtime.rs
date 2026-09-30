@@ -31,6 +31,11 @@ impl<D: GatewayDriver> WorkerBuilder<D> {
             bind_addr,
             gateway_command_timeout,
             shutdown_timeout,
+            api_token,
+            per_ip_request_limit,
+            limiter_table_capacity,
+            body_limit,
+            callback_timeout,
             ..
         } = self.config;
         let (commands_tx, commands_rx) = mpsc::channel(64);
@@ -95,6 +100,11 @@ impl<D: GatewayDriver> WorkerBuilder<D> {
                 lavalink: client,
             },
             voice,
+            api_token,
+            per_ip_request_limit,
+            limiter_table_capacity,
+            body_limit,
+            callback_timeout,
             gateway_shutdown: Some(gateway_shutdown_tx),
             gateway_task: Some(gateway_task),
             relay_task: Some(relay_task),
@@ -109,6 +119,11 @@ pub struct RunningWorker {
     status: StatusState,
     #[allow(dead_code)]
     voice: VoiceStateStore,
+    api_token: crate::config::SecretString,
+    per_ip_request_limit: usize,
+    limiter_table_capacity: usize,
+    body_limit: usize,
+    callback_timeout: std::time::Duration,
     gateway_shutdown: Option<watch::Sender<bool>>,
     gateway_task: Option<JoinHandle<WorkerResult<()>>>,
     relay_task: Option<JoinHandle<()>>,
@@ -117,7 +132,24 @@ pub struct RunningWorker {
 }
 impl RunningWorker {
     pub fn router(&self) -> axum::Router {
-        axum::Router::new()
+        let client = self.status.lavalink.clone();
+        let status = self.status.clone();
+        let state = Arc::new(crate::api::WorkerApiState {
+            client,
+            voice: self.voice.clone(),
+            status: Arc::new(move || status.snapshot()),
+            body_limit: self.body_limit,
+            deadline: self.callback_timeout,
+        });
+        let auth = crate::auth::AuthState::new(
+            crate::config::SecretString::new(self.api_token.expose_secret()),
+            crate::auth::RateLimitConfig {
+                requests: self.per_ip_request_limit,
+                window: std::time::Duration::from_secs(60),
+                table_capacity: self.limiter_table_capacity,
+            },
+        );
+        crate::api::router(state, auth)
     }
     pub fn status(&self) -> WorkerStatus {
         self.status.snapshot()

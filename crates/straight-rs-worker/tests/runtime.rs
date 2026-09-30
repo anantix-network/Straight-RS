@@ -15,7 +15,7 @@ fn config(host: String) -> straight_rs_worker::WorkerConfig {
     WorkerConfigBuilder::new(
         UserId(9),
         SecretString::new("bot-token"),
-        SecretString::new("api-token"),
+        SecretString::new("api-token-that-is-at-least-thirty-two-bytes"),
         vec![NodeConfig::new(host, "pw")],
     )
     .build()

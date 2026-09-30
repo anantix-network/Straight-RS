@@ -84,6 +84,11 @@ impl WorkerConfig {
         if self.bot_token.expose_secret().is_empty() || self.api_token.expose_secret().is_empty() {
             return Err(WorkerError::Config("credentials must not be empty".into()));
         }
+        if self.api_token.expose_secret().len() < 32 {
+            return Err(WorkerError::Config(
+                "API token must be at least 32 bytes".into(),
+            ));
+        }
         if self.nodes.is_empty() {
             return Err(WorkerError::Config(
                 "at least one Lavalink node is required".into(),
@@ -133,7 +138,7 @@ mod tests {
         WorkerConfigBuilder::new(
             UserId(1),
             SecretString::new("bot-token"),
-            SecretString::new("api-token"),
+            SecretString::new("api-token-that-is-at-least-thirty-two-bytes"),
             vec![NodeConfig::new("localhost:2333", "password")],
         )
     }
@@ -143,7 +148,7 @@ mod tests {
         let builder = WorkerConfigBuilder::new(
             UserId(1),
             SecretString::new(""),
-            SecretString::new("api-token"),
+            SecretString::new("api-token-that-is-at-least-thirty-two-bytes"),
             vec![NodeConfig::new("localhost:2333", "password")],
         );
         assert!(matches!(builder.build(), Err(WorkerError::Config(_))));
@@ -161,11 +166,22 @@ mod tests {
     }
 
     #[test]
+    fn rejects_short_api_token() {
+        let builder = WorkerConfigBuilder::new(
+            UserId(1),
+            SecretString::new("bot-token"),
+            SecretString::new("short"),
+            vec![NodeConfig::new("localhost:2333", "password")],
+        );
+        assert!(matches!(builder.build(), Err(WorkerError::Config(_))));
+    }
+
+    #[test]
     fn rejects_empty_nodes() {
         let builder = WorkerConfigBuilder::new(
             UserId(1),
             SecretString::new("bot-token"),
-            SecretString::new("api-token"),
+            SecretString::new("api-token-that-is-at-least-thirty-two-bytes"),
             vec![],
         );
         assert!(matches!(builder.build(), Err(WorkerError::Config(_))));
