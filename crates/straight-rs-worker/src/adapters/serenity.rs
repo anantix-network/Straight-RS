@@ -6,7 +6,7 @@ use crate::{
 use serenity::{
     async_trait,
     client::{Context, EventHandler},
-    gateway::ShardMessenger,
+    gateway::{ConnectionStage, ShardMessenger, ShardStageUpdateEvent},
     model::{
         event::{ResumedEvent, VoiceServerUpdateEvent},
         gateway::{GatewayIntents, Ready},
@@ -47,6 +47,9 @@ impl EventHandler for Handler {
         *self.messenger.lock().await = Some(ctx.shard.clone());
         let _ = self.events.send(GatewayEvent::Ready).await;
     }
+    async fn shard_stage_update(&self, _: Context, event: ShardStageUpdateEvent) {
+        forward_stage_update(&self.events, event).await;
+    }
     async fn voice_state_update(&self, _: Context, _: Option<VoiceState>, new: VoiceState) {
         if let Some((guild, update)) = map_voice_state(&new, self.bot_user_id) {
             let _ = self
@@ -66,6 +69,12 @@ impl EventHandler for Handler {
                 .send(GatewayEvent::VoiceServer { guild, update })
                 .await;
         }
+    }
+}
+
+async fn forward_stage_update(events: &mpsc::Sender<GatewayEvent>, event: ShardStageUpdateEvent) {
+    if !matches!(event.new, ConnectionStage::Connected) {
+        let _ = events.send(GatewayEvent::Disconnected).await;
     }
 }
 
@@ -185,6 +194,25 @@ mod tests {
             "suppress": false, "user_id": user.to_string(), "request_to_speak_timestamp": null
         })).unwrap()
     }
+    #[tokio::test]
+    async fn shard_stage_callback_forwards_disconnect_and_connecting_stages() {
+        let (events, mut received) = mpsc::channel(2);
+        for new in [ConnectionStage::Disconnected, ConnectionStage::Connecting] {
+            forward_stage_update(
+                &events,
+                ShardStageUpdateEvent {
+                    new,
+                    old: ConnectionStage::Connected,
+                    shard_id: serenity::model::id::ShardId(0),
+                },
+            )
+            .await;
+            assert!(matches!(
+                received.recv().await,
+                Some(GatewayEvent::Disconnected)
+            ));
+        }
+    }
     #[test]
     fn maps_only_configured_bot_voice_state_and_allows_leave() {
         let (guild, update) = map_voice_state(&voice_state(1, Some(9)), UserId(1)).unwrap();
@@ -228,6 +256,51 @@ mod tests {
         assert_eq!(join["d"]["self_deaf"], false);
         assert!(voice_state_payload(GuildId(10), None)["d"]["channel_id"].is_null());
     }
+    #[tokio::test]
+    async fn command_loop_forwards_join_and_leave_voice_payloads() {
+        let (commands, commands_rx) = mpsc::channel(2);
+        let (_shutdown, shutdown_rx) = watch::channel(false);
+        let mut replies = Vec::new();
+        for channel in [Some(ChannelId(20)), None] {
+            let (reply, response) = tokio::sync::oneshot::channel();
+            commands
+                .send(GatewayCommand::SetVoiceState {
+                    guild: GuildId(10),
+                    channel,
+                    reply,
+                })
+                .await
+                .unwrap();
+            replies.push(response);
+        }
+        drop(commands);
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = sent.clone();
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            command_loop(commands_rx, shutdown_rx, move |guild, channel| {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(voice_state_payload(guild, channel));
+                async { Ok(()) }
+            }),
+        )
+        .await
+        .expect("command loop must process queued voice commands")
+        .unwrap();
+        for reply in replies {
+            reply.await.unwrap().unwrap();
+        }
+        assert_eq!(
+            *sent.lock().unwrap(),
+            vec![
+                serde_json::json!({"op":4,"d":{"guild_id":"10","channel_id":"20","self_mute":false,"self_deaf":false}}),
+                serde_json::json!({"op":4,"d":{"guild_id":"10","channel_id":null,"self_mute":false,"self_deaf":false}}),
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn command_loop_replies_and_exits_on_shutdown() {
         let (commands_tx, commands_rx) = mpsc::channel(1);

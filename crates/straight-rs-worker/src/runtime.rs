@@ -187,7 +187,7 @@ impl<D: GatewayDriver> WorkerBuilder<D> {
                         Some(GatewayEvent::VoiceState { user_id, guild, update }) if user_id == relay_bot_id => { relay_voice.update(guild, update.channel_id); if relay_client.voice_state_update(guild, update).await.is_err() { relay_degraded.store(true, Ordering::Release); } }
                         Some(GatewayEvent::VoiceState { .. }) => {}
                         Some(GatewayEvent::VoiceServer { guild, update }) => { if relay_client.voice_server_update(guild, update).await.is_err() { relay_degraded.store(true, Ordering::Release); } }
-                        None => { relay_degraded.store(true, Ordering::Release); publisher.publish(&relay_status); break; }
+                        None => { relay_ready.store(false, Ordering::Release); relay_degraded.store(true, Ordering::Release); publisher.publish(&relay_status); break; }
                     },
                     event = events.recv() => match event {
                         Ok(event) => {

@@ -10,6 +10,7 @@ use straight_rs_worker::{
     GatewayEvent, SecretString, WorkerBuilder, WorkerConfigBuilder, WorkerError,
 };
 use tokio::sync::watch;
+use tower::ServiceExt;
 
 fn config(host: String) -> straight_rs_worker::WorkerConfig {
     WorkerConfigBuilder::new(
@@ -116,6 +117,66 @@ async fn readiness_waits_for_gateway_ready_event() {
     ready.send(GatewayEvent::Ready).unwrap();
     wait_ready(&worker).await;
     worker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn readiness_tracks_disconnect_resume_and_gateway_stream_close() {
+    let lavalink = mock_lavalink::MockLavalink::start().await;
+    let gateway = fake_gateway::ControlledGateway::new(false);
+    let events = gateway.events.clone();
+    let mut worker = WorkerBuilder::new(config(lavalink.host()), gateway)
+        .build()
+        .await
+        .unwrap();
+    wait_ready(&worker).await;
+
+    events.send(GatewayEvent::Disconnected).unwrap();
+    wait_gateway_ready(&worker, false).await;
+    assert!(!worker.status().ready);
+
+    events.send(GatewayEvent::Ready).unwrap();
+    wait_gateway_ready(&worker, true).await;
+    wait_ready(&worker).await;
+    worker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn gateway_driver_exit_clears_readiness() {
+    let lavalink = mock_lavalink::MockLavalink::start().await;
+    let (exit, exit_rx) = watch::channel(false);
+    let mut worker = WorkerBuilder::new(
+        config(lavalink.host()),
+        fake_gateway::ReadyThenExitGateway { exit: exit_rx },
+    )
+    .build()
+    .await
+    .unwrap();
+    exit.send(true).unwrap();
+    wait_gateway_ready(&worker, false).await;
+    assert!(!worker.status().ready);
+
+    let response = worker
+        .router()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/readyz")
+                .header(
+                    "authorization",
+                    "Bearer api-token-that-is-at-least-thirty-two-bytes",
+                )
+                .extension(axum::extract::ConnectInfo(
+                    "127.0.0.1:54321".parse::<std::net::SocketAddr>().unwrap(),
+                ))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    );
+    let _ = worker.shutdown().await;
 }
 
 #[tokio::test]

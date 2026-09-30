@@ -9,6 +9,32 @@ use tokio::sync::{mpsc, oneshot, watch};
 pub struct FakeGateway;
 
 #[allow(dead_code)]
+pub struct ReadyThenExitGateway {
+    pub exit: watch::Receiver<bool>,
+}
+#[allow(dead_code)]
+impl GatewayDriver for ReadyThenExitGateway {
+    fn run<'a>(
+        &'a self,
+        _token: SecretString,
+        _bot_user_id: UserId,
+        _commands: mpsc::Receiver<GatewayCommand>,
+        events: mpsc::Sender<GatewayEvent>,
+        _shutdown: watch::Receiver<bool>,
+    ) -> GatewayFuture<'a> {
+        let mut exit = self.exit.clone();
+        Box::pin(async move {
+            events
+                .send(GatewayEvent::Ready)
+                .await
+                .map_err(|_| WorkerError::GatewayClosed)?;
+            let _ = exit.changed().await;
+            Ok(())
+        })
+    }
+}
+
+#[allow(dead_code)]
 pub struct ControlledGateway {
     pub events: mpsc::UnboundedSender<GatewayEvent>,
     receiver: std::sync::Mutex<Option<mpsc::UnboundedReceiver<GatewayEvent>>>,
