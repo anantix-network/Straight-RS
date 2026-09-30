@@ -14,16 +14,26 @@ pub struct ControlledGateway {
     receiver: std::sync::Mutex<Option<mpsc::UnboundedReceiver<GatewayEvent>>>,
     pub stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub fail_on_shutdown: bool,
+    pub initial_ready: bool,
+    pub ready: mpsc::UnboundedSender<GatewayEvent>,
 }
 #[allow(dead_code)]
 impl ControlledGateway {
     pub fn new(fail_on_shutdown: bool) -> Self {
+        Self::with_initial_ready(fail_on_shutdown, true)
+    }
+    pub fn withheld_ready() -> Self {
+        Self::with_initial_ready(false, false)
+    }
+    fn with_initial_ready(fail_on_shutdown: bool, initial_ready: bool) -> Self {
         let (events, receiver) = mpsc::unbounded_channel();
         Self {
+            ready: events.clone(),
             events,
             receiver: std::sync::Mutex::new(Some(receiver)),
             stopped: std::sync::Arc::default(),
             fail_on_shutdown,
+            initial_ready,
         }
     }
 }
@@ -43,11 +53,14 @@ impl GatewayDriver for ControlledGateway {
             .take()
             .expect("gateway driver runs once");
         let stopped = self.stopped.clone();
+        let initial_ready = self.initial_ready;
         Box::pin(async move {
-            events
-                .send(GatewayEvent::Ready)
-                .await
-                .map_err(|_| WorkerError::GatewayClosed)?;
+            if initial_ready {
+                events
+                    .send(GatewayEvent::Ready)
+                    .await
+                    .map_err(|_| WorkerError::GatewayClosed)?;
+            }
             loop {
                 tokio::select! {
                     _ = shutdown.changed() => {

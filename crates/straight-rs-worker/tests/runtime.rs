@@ -30,21 +30,32 @@ async fn wait_ready(worker: &straight_rs_worker::RunningWorker) {
     .await
     .expect("readiness deadline elapsed");
 }
-async fn assert_no_player_patch(mock: &mock_lavalink::MockLavalink) {
-    tokio::time::timeout(Duration::from_millis(100), async {
-        loop {
-            assert!(
-                !mock
-                    .requests()
-                    .iter()
-                    .any(|r| r.method == "PATCH" && r.path.contains("/players/")),
-                "unexpected player PATCH"
-            );
+async fn wait_gateway_ready(worker: &straight_rs_worker::RunningWorker, expected: bool) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while worker.status().gateway_ready != expected {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect_err("negative observation window unexpectedly completed");
+    .expect("gateway readiness deadline elapsed");
+}
+async fn wait_lavalink_ready(worker: &straight_rs_worker::RunningWorker, expected: bool) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while worker.status().lavalink_ready != expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("Lavalink readiness deadline elapsed");
+}
+async fn assert_no_player_patch(mock: &mock_lavalink::MockLavalink) {
+    assert!(
+        !mock
+            .requests()
+            .iter()
+            .any(|r| r.method == "PATCH" && r.path.contains("/players/")),
+        "unexpected player PATCH"
+    );
 }
 async fn player_patches(
     mock: &mock_lavalink::MockLavalink,
@@ -91,6 +102,39 @@ async fn readiness_requires_gateway_and_lavalink_ready() {
 }
 
 #[tokio::test]
+async fn readiness_waits_for_gateway_ready_event() {
+    let lavalink = mock_lavalink::MockLavalink::start().await;
+    let gateway = fake_gateway::ControlledGateway::withheld_ready();
+    let ready = gateway.ready.clone();
+    let mut worker = WorkerBuilder::new(config(lavalink.host()), gateway)
+        .build()
+        .await
+        .unwrap();
+    wait_lavalink_ready(&worker, true).await;
+    wait_gateway_ready(&worker, false).await;
+    assert!(!worker.status().ready);
+    ready.send(GatewayEvent::Ready).unwrap();
+    wait_ready(&worker).await;
+    worker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn readiness_waits_for_lavalink_ready_handshake() {
+    let lavalink = mock_lavalink::MockLavalink::start_paused().await;
+    let release = lavalink.release_ready();
+    let mut worker = WorkerBuilder::new(config(lavalink.host()), fake_gateway::FakeGateway)
+        .build()
+        .await
+        .unwrap();
+    wait_gateway_ready(&worker, true).await;
+    wait_lavalink_ready(&worker, false).await;
+    assert!(!worker.status().ready);
+    release.send(true).unwrap();
+    wait_ready(&worker).await;
+    worker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn non_bot_voice_state_is_ignored_and_bot_state_reaches_lavalink() {
     let lavalink = mock_lavalink::MockLavalink::start().await;
     let gateway = fake_gateway::ControlledGateway::new(false);
@@ -113,6 +157,8 @@ async fn non_bot_voice_state_is_ignored_and_bot_state_reaches_lavalink() {
             update: server("foreign-token"),
         })
         .unwrap();
+    events.send(GatewayEvent::Disconnected).unwrap();
+    wait_gateway_ready(&worker, false).await;
     assert_no_player_patch(&lavalink).await;
     events
         .send(GatewayEvent::VoiceState {
