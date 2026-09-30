@@ -33,7 +33,7 @@ percent-encoding.workspace = true
 rand.workspace = true
 hyper-rustls = { version = "0.27", optional = true, default-features = false, features = ["http1", "ring", "webpki-tokio"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
-serenity = { version = "0.12", optional = true, default-features = false, features = ["model"] }
+serenity = { version = "0.12", optional = true, default-features = false, features = ["model", "rustls_backend"] }
 twilight-model = { version = "0.16", optional = true }
 songbird = { version = "0.4", optional = true, default-features = false }
 

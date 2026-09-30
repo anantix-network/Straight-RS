@@ -36,3 +36,4 @@ pub use node::{Node, NodeStatus};
 mod player;
 
 pub use player::{Player, PlayerEvents};
+pub mod adapters;
