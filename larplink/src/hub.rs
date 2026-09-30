@@ -8,6 +8,24 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Notify};
 
+/// State a player must still be in (checked under its gate) for `restore_to` to act.
+#[derive(Clone, Copy)]
+pub(crate) enum Expect {
+    /// Still orphaned.
+    Rescue,
+    /// Still assigned to the node being restored and not orphaned.
+    Restore,
+    /// Still on `from`, which is still down in the same outage `epoch`.
+    Migrate { from: usize, epoch: u64 },
+}
+
+pub(crate) enum Restored {
+    /// Re-created on the target; carries the node it was assigned to before.
+    Moved { from: Option<usize> },
+    /// Destroyed, or no longer in the expected state: nothing was sent.
+    Skipped,
+}
+
 pub(crate) struct Hub {
     pub(crate) user_id: UserId,
     pub(crate) client_name: String,
@@ -78,7 +96,7 @@ impl Hub {
         tokio::spawn(async move {
             tokio::time::sleep(node.cfg.failover_grace).await;
             if node.epoch() == epoch && !node.is_ready() {
-                hub.migrate_from(node.index).await;
+                hub.migrate_from(node.index, epoch).await;
             }
         });
     }
@@ -116,12 +134,14 @@ impl Hub {
         }
     }
 
-    /// Re-create `p` on `node` from client-side state.
-    pub(crate) async fn restore_to(&self, p: &Arc<PlayerInner>, node: &Arc<Node>) -> Result<()> {
+    /// Re-create `p` on `node` from client-side state, provided `expect` still
+    /// holds once the player's gate is taken.
+    pub(crate) async fn restore_to(&self, p: &Arc<PlayerInner>, node: &Arc<Node>, expect: Expect) -> Result<Restored> {
         let _gate = p.gate.lock().await;
-        if p.destroyed.load(Ordering::Acquire) {
-            return Ok(()); // never resurrect a destroyed player
+        if !self.expected(p, node.index, expect) {
+            return Ok(Restored::Skipped);
         }
+        let from = p.node_index();
         if let Some(upd) = p.restore_payload() {
             let sid = node.session_id().ok_or(Error::NoNode)?;
             let resp = node.rest().update_player(&sid, p.guild, &upd, false).await?;
@@ -129,7 +149,32 @@ impl Hub {
         }
         p.set_node(node.index);
         p.orphaned.store(false, Ordering::Release);
-        Ok(())
+        Ok(Restored::Moved { from })
+    }
+
+    /// Whether `p` (gate held by the caller) is still eligible for the flow
+    /// described by `expect`. Destroyed players never are.
+    fn expected(&self, p: &PlayerInner, target: usize, expect: Expect) -> bool {
+        if p.destroyed.load(Ordering::Acquire) {
+            return false; // never resurrect a destroyed player
+        }
+        let orphaned = p.orphaned.load(Ordering::Acquire);
+        match expect {
+            Expect::Rescue => orphaned,
+            Expect::Restore => !orphaned && p.node_index() == Some(target),
+            Expect::Migrate { from, epoch } => {
+                p.node_index() == Some(from)
+                    && self.nodes.get(from).is_some_and(|n| n.epoch() == epoch && !n.is_ready())
+            }
+        }
+    }
+
+    /// Mark `p` orphaned, unless the migration precondition stopped holding.
+    async fn orphan(&self, p: &PlayerInner, from: usize, epoch: u64) {
+        let _gate = p.gate.lock().await;
+        if self.expected(p, from, Expect::Migrate { from, epoch }) {
+            p.orphaned.store(true, Ordering::Release);
+        }
     }
 
     fn players_where(&self, f: impl Fn(&PlayerInner) -> bool) -> Vec<Arc<PlayerInner>> {
@@ -140,27 +185,32 @@ impl Hub {
     pub(crate) async fn restore_players(&self, node: &Arc<Node>) {
         let idx = node.index;
         for p in self.players_where(|p| p.node_index() == Some(idx) && !p.orphaned.load(Ordering::Acquire)) {
-            if let Err(e) = self.restore_to(&p, node).await {
+            if let Err(e) = self.restore_to(&p, node, Expect::Restore).await {
                 tracing::warn!(guild = %p.guild, error = %e, "failed to restore player after session loss");
             }
         }
     }
 
     /// Node stayed down past the grace period: move its players elsewhere.
-    pub(crate) async fn migrate_from(self: &Arc<Self>, idx: usize) {
+    pub(crate) async fn migrate_from(self: &Arc<Self>, idx: usize, epoch: u64) {
         for p in self.players_where(|p| p.node_index() == Some(idx)) {
+            match self.nodes.get(idx) {
+                Some(n) if n.epoch() == epoch && !n.is_ready() => {}
+                _ => return, // node came back (or flapped): stop moving players
+            }
             let Some(target) = self.pick_node(Some(idx)) else {
-                p.orphaned.store(true, Ordering::Release);
+                self.orphan(&p, idx, epoch).await;
                 continue;
             };
-            match self.restore_to(&p, &target).await {
-                Ok(()) => {
+            match self.restore_to(&p, &target, Expect::Migrate { from: idx, epoch }).await {
+                Ok(Restored::Skipped) => {}
+                Ok(Restored::Moved { .. }) => {
                     self.stale.insert((idx, p.guild));
                     self.emit(Event::PlayerMigrated { guild: p.guild, from: idx, to: target.index });
                 }
                 Err(e) => {
                     tracing::warn!(guild = %p.guild, error = %e, "player migration failed");
-                    p.orphaned.store(true, Ordering::Release);
+                    self.orphan(&p, idx, epoch).await;
                 }
             }
         }
@@ -169,9 +219,9 @@ impl Hub {
     /// A node became ready: adopt players that had nowhere to go.
     pub(crate) async fn rescue_orphans(&self, node: &Arc<Node>) {
         for p in self.players_where(|p| p.orphaned.load(Ordering::Acquire)) {
-            let from = p.node_index();
-            match self.restore_to(&p, node).await {
-                Ok(()) => {
+            match self.restore_to(&p, node, Expect::Rescue).await {
+                Ok(Restored::Skipped) => {}
+                Ok(Restored::Moved { from }) => {
                     if let Some(from) = from.filter(|f| *f != node.index) {
                         self.stale.insert((from, p.guild));
                         self.emit(Event::PlayerMigrated { guild: p.guild, from, to: node.index });
@@ -200,5 +250,86 @@ impl Hub {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::NodeConfig;
+    use crate::state::lock;
+    use larplink_model::VoiceState;
+
+    fn hub() -> Arc<Hub> {
+        let nodes = (0..2).map(|i| Node::new(i, NodeConfig::new("127.0.0.1:1", "pw"), "test")).collect();
+        Arc::new(Hub {
+            user_id: UserId(1),
+            client_name: "test".into(),
+            nodes,
+            players: DashMap::new(),
+            stale: DashSet::new(),
+            events: broadcast::channel(16).0,
+            strategy: Strategy::default(),
+            rr: AtomicUsize::new(0),
+            ready: Notify::new(),
+            gateway: None,
+        })
+    }
+
+    /// Give `p` a restore payload. The test nodes have no session, so any
+    /// restore that got past its precondition would fail with `NoNode`.
+    fn with_payload(p: &PlayerInner) {
+        let vs = VoiceState { token: "t".into(), endpoint: "e".into(), session_id: "s".into(), channel_id: None };
+        lock(&p.voice).mark_sent(vs);
+    }
+
+    #[tokio::test]
+    async fn second_rescue_of_the_same_orphan_is_skipped() {
+        let h = hub();
+        let p = Arc::new(PlayerInner::new(GuildId(1)));
+        p.set_node(0);
+        p.orphaned.store(true, Ordering::Release);
+        // First rescue (no payload -> no REST call) adopts it on node 1.
+        let r = h.restore_to(&p, &h.nodes[1], Expect::Rescue).await;
+        assert!(matches!(r, Ok(Restored::Moved { from: Some(0) })));
+        assert_eq!(p.node_index(), Some(1));
+        // A concurrent rescue on node 0 that snapshotted the orphan earlier.
+        with_payload(&p);
+        let r = h.restore_to(&p, &h.nodes[0], Expect::Rescue).await;
+        assert!(matches!(r, Ok(Restored::Skipped)));
+        assert_eq!(p.node_index(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn restore_and_migrate_recheck_assignment_and_epoch() {
+        let h = hub();
+        let p = Arc::new(PlayerInner::new(GuildId(1)));
+        with_payload(&p);
+        p.set_node(1); // already migrated away from node 0
+        let r = h.restore_to(&p, &h.nodes[0], Expect::Restore).await;
+        assert!(matches!(r, Ok(Restored::Skipped)));
+        let r = h.restore_to(&p, &h.nodes[0], Expect::Migrate { from: 0, epoch: h.nodes[0].epoch() }).await;
+        assert!(matches!(r, Ok(Restored::Skipped)));
+        p.set_node(0);
+        let stale_epoch = h.nodes[0].epoch();
+        h.nodes[0].bump_epoch(); // node 0 flapped: a newer outage
+        let r = h.restore_to(&p, &h.nodes[1], Expect::Migrate { from: 0, epoch: stale_epoch }).await;
+        assert!(matches!(r, Ok(Restored::Skipped)));
+        // Precondition holds -> it gets as far as the REST call (no session here).
+        let r = h.restore_to(&p, &h.nodes[1], Expect::Migrate { from: 0, epoch: h.nodes[0].epoch() }).await;
+        assert!(matches!(r, Err(Error::NoNode)));
+    }
+
+    #[tokio::test]
+    async fn destroyed_player_is_always_skipped() {
+        let h = hub();
+        let p = Arc::new(PlayerInner::new(GuildId(1)));
+        with_payload(&p);
+        p.set_node(0);
+        p.orphaned.store(true, Ordering::Release);
+        p.destroyed.store(true, Ordering::Release);
+        let r = h.restore_to(&p, &h.nodes[1], Expect::Rescue).await;
+        assert!(matches!(r, Ok(Restored::Skipped)));
+        assert_eq!(p.node_index(), Some(0));
     }
 }
