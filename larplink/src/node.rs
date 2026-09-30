@@ -33,6 +33,10 @@ pub struct Node {
     players: AtomicU32,
     stats: ArcSwapOption<Stats>,
     epoch: AtomicU64,
+    /// Bumped whenever the node hands out a session that does not carry our
+    /// players (`resumed = false`); players remember the generation they were
+    /// last written on.
+    session_gen: AtomicU64,
     info: OnceCell<Info>,
     version: OnceCell<String>,
 }
@@ -53,6 +57,7 @@ impl Node {
             players: AtomicU32::new(0),
             stats: ArcSwapOption::empty(),
             epoch: AtomicU64::new(0),
+            session_gen: AtomicU64::new(0),
             info: OnceCell::new(),
             version: OnceCell::new(),
         })
@@ -101,6 +106,9 @@ impl Node {
     }
     pub(crate) fn epoch(&self) -> u64 {
         self.epoch.load(Acquire)
+    }
+    pub(crate) fn session_gen(&self) -> u64 {
+        self.session_gen.load(Acquire)
     }
 
     pub async fn info(&self) -> Result<&Info> {
@@ -208,7 +216,13 @@ impl Node {
         match WsMessage::parse(text) {
             Ok(WsMessage::Ready(_)) if hub.is_closed() => {}
             Ok(WsMessage::Ready(r)) => {
+                let same = self.session_id().is_some_and(|s| *s == r.session_id);
                 self.session_id.store(Some(Arc::new(r.session_id.clone())));
+                if !r.resumed || !same {
+                    // After the new id is visible and before Ready: a writer
+                    // that sees Ready sees the new generation.
+                    self.session_gen.fetch_add(1, AcqRel);
+                }
                 self.set_status(NodeStatus::Ready);
                 backoff.reset();
                 self.enable_resume(hub, r.session_id.clone());

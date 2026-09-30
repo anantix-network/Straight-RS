@@ -65,6 +65,9 @@ pub(crate) struct PlayerInner {
     pub(crate) voice: Mutex<VoiceAssembler>,
     /// Fair FIFO gate: at most one in-flight write per guild, in call order.
     pub(crate) gate: tokio::sync::Mutex<()>,
+    /// (node, session generation) of the last successful write; only
+    /// touched under the gate.
+    written: Mutex<Option<(usize, u64)>>,
 }
 
 impl PlayerInner {
@@ -77,7 +80,33 @@ impl PlayerInner {
             snapshot: ArcSwap::from_pointee(PlayerSnapshot::default()),
             voice: Mutex::new(VoiceAssembler::default()),
             gate: tokio::sync::Mutex::new(()),
+            written: Mutex::new(None),
         }
+    }
+
+    /// Whether the node's current session already has this player's state.
+    pub(crate) fn written_on(&self, node: usize, gen: u64) -> bool {
+        *lock(&self.written) == Some((node, gen))
+    }
+
+    pub(crate) fn mark_written(&self, node: usize, gen: u64) {
+        *lock(&self.written) = Some((node, gen));
+    }
+
+    /// Completes a user write bound for `node`'s session `gen`: if the player
+    /// was last written on another node or session (lost session, move), the
+    /// restore state is merged in (the caller's fields win), and a voice state
+    /// the node does not have yet rides along.
+    pub(crate) fn prepare(&self, upd: UpdatePlayer, node: usize, gen: u64) -> UpdatePlayer {
+        let written = *lock(&self.written);
+        let mut upd = match (written, self.restore_payload()) {
+            (Some(w), Some(base)) if w != (node, gen) => merge(upd, base),
+            _ => upd,
+        };
+        if upd.voice.is_none() {
+            upd.voice = lock(&self.voice).pending();
+        }
+        upd
     }
 
     pub(crate) fn node_index(&self) -> Option<usize> {
@@ -163,6 +192,28 @@ impl PlayerInner {
         upd.filters = Some(s.filters.clone());
         upd.voice = voice;
         Some(upd)
+    }
+}
+
+/// `user` over `base`, field by field. A new track in `user` also drops the
+/// old track's position/end time from `base`.
+fn merge(user: UpdatePlayer, base: UpdatePlayer) -> UpdatePlayer {
+    let (position, end_time) = if user.track.is_some() {
+        (user.position, user.end_time)
+    } else {
+        (
+            user.position.or(base.position),
+            user.end_time.or(base.end_time),
+        )
+    };
+    UpdatePlayer {
+        track: user.track.or(base.track),
+        position,
+        end_time,
+        volume: user.volume.or(base.volume),
+        paused: user.paused.or(base.paused),
+        filters: user.filters.or(base.filters),
+        voice: user.voice.or(base.voice),
     }
 }
 
@@ -264,6 +315,41 @@ mod tests {
         vs.endpoint = "new".into(); // region change that was never delivered
         lock(&p.voice).set(&vs);
         assert_eq!(p.restore_payload().unwrap().voice.unwrap().endpoint, "new");
+    }
+    #[test]
+    fn prepare_merges_restore_state_only_after_a_session_change() {
+        let p = PlayerInner::new(GuildId(1));
+        p.apply_player(&model_player(
+            Some(track("A", 100_000, false)),
+            2_000,
+            false,
+        ));
+        let vol = UpdatePlayer {
+            volume: Some(5),
+            ..Default::default()
+        };
+        // Never written: nothing to restore.
+        assert_eq!(p.prepare(vol.clone(), 0, 1), vol);
+        p.mark_written(0, 1);
+        assert_eq!(p.prepare(vol.clone(), 0, 1), vol);
+        // New session on the same node: restore fields, user's volume wins.
+        let u = p.prepare(vol.clone(), 0, 2);
+        assert_eq!(u.volume, Some(5));
+        assert_eq!(u.track.unwrap().encoded, Some(Some("A".into())));
+        assert!(u.position.unwrap() >= 2_000);
+        assert_eq!(u.paused, Some(false));
+        // Moving to another node: a new track drops the old position.
+        let play = UpdatePlayer {
+            track: Some(UpdateTrack {
+                encoded: Some(Some("B".into())),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let u = p.prepare(play, 1, 1);
+        assert_eq!(u.track.unwrap().encoded, Some(Some("B".into())));
+        assert_eq!(u.position, None);
+        assert_eq!(u.volume, Some(80));
     }
     #[test]
     fn restore_payload_skips_position_for_streams() {

@@ -1,4 +1,4 @@
-use crate::hub::Hub;
+use crate::hub::{Hub, Route};
 use crate::state::{lock, PlayerInner, PlayerSnapshot};
 use crate::voice::VoiceAssembler;
 use crate::{
@@ -111,30 +111,38 @@ impl Player {
 
     /// Sends `upd` to the player's node. The caller holds the gate.
     ///
-    /// A complete voice state the node does not have yet (e.g. one assembled
-    /// while no node was ready, or whose PATCH failed) rides along unless
-    /// `upd` carries its own.
-    async fn write_locked(&self, mut upd: UpdatePlayer, no_replace: bool) -> Result<()> {
+    /// A player whose node is down (or that is orphaned) is first moved to a
+    /// healthy node. If the target session does not have this player yet
+    /// (lost session, move), the restore state is merged into `upd`; a
+    /// complete voice state the node does not have yet (e.g. assembled while
+    /// no node was ready, or whose PATCH failed) rides along too.
+    async fn write_locked(&self, upd: UpdatePlayer, no_replace: bool) -> Result<()> {
         if self.hub.is_closed() {
             return Err(Error::Closed);
         }
         if self.inner.destroyed.load(Ordering::Acquire) {
             return Err(Error::PlayerNotFound);
         }
-        let node = self.hub.node_for(&self.inner)?;
+        let (node, moving) = match self.hub.route(&self.inner)? {
+            Route::Stay(n) => (n, false),
+            Route::Move(n) => (n, true),
+        };
+        let gen = node.session_gen();
         let sid = node.session_id().ok_or(Error::NoNode)?;
-        if upd.voice.is_none() {
-            upd.voice = lock(&self.inner.voice).pending();
-        }
+        let upd = self.inner.prepare(upd, node.index, gen);
         let resp = node
             .rest()
             .update_player(&sid, self.inner.guild, &upd, no_replace)
             .await?;
         self.inner.apply_player(&resp);
+        self.inner.mark_written(node.index, gen);
         if let Some(vs) = upd.voice {
             // Only after success, so a failed PATCH is retried by the next
             // identical update (or the next write).
             lock(&self.inner.voice).mark_sent(vs);
+        }
+        if moving {
+            self.hub.adopt(&self.inner, &node);
         }
         Ok(())
     }

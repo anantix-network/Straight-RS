@@ -1,6 +1,6 @@
 use crate::balancer::{pick, NodeView, Strategy};
 use crate::node::Node;
-use crate::state::PlayerInner;
+use crate::state::{lock, PlayerInner};
 use crate::{Error, Event, Result, TrackEndReason, VoiceGateway};
 use dashmap::{DashMap, DashSet};
 use larplink_model::{GuildId, UserId, WsMessage};
@@ -17,6 +17,13 @@ pub(crate) enum Expect {
     Restore,
     /// Still on `from`, which is still down in the same outage `epoch`.
     Migrate { from: usize, epoch: u64 },
+}
+
+pub(crate) enum Route {
+    /// The player's current node.
+    Stay(Arc<Node>),
+    /// A different (or re-readied) node the player must be rebuilt on.
+    Move(Arc<Node>),
 }
 
 pub(crate) enum Restored {
@@ -147,6 +154,42 @@ impl Hub {
         }
     }
 
+    /// Where a write for `p` must go (gate held by the caller). A player that
+    /// is orphaned or whose node is down moves to the best ready node
+    /// (`Route::Move`); the caller completes the move with `adopt` once the
+    /// write succeeded.
+    pub(crate) fn route(&self, p: &PlayerInner) -> Result<Route> {
+        if self.is_closed() {
+            return Err(Error::Closed);
+        }
+        match p.node_index() {
+            Some(i) => {
+                let healthy = !p.orphaned.load(Ordering::Acquire)
+                    && self.nodes.get(i).is_some_and(|n| n.is_ready());
+                match self.nodes.get(i) {
+                    Some(n) if healthy => Ok(Route::Stay(n.clone())),
+                    _ => self.pick_node(None).map(Route::Move).ok_or(Error::NoNode),
+                }
+            }
+            None => self.node_for(p).map(Route::Stay),
+        }
+    }
+
+    /// Finish moving `p` (gate held) to `node`, where it now exists.
+    pub(crate) fn adopt(&self, p: &PlayerInner, node: &Node) {
+        let from = p.node_index();
+        p.set_node(node.index);
+        p.orphaned.store(false, Ordering::Release);
+        if let Some(from) = from.filter(|f| *f != node.index) {
+            self.stale.insert((from, p.guild));
+            self.emit(Event::PlayerMigrated {
+                guild: p.guild,
+                from,
+                to: node.index,
+            });
+        }
+    }
+
     pub(crate) fn node_ready(self: &Arc<Self>, node: &Arc<Node>, resumed: bool) {
         node.bump_epoch(); // cancels a pending failover timer
         if self.is_closed() {
@@ -241,13 +284,22 @@ impl Hub {
             return Ok(Restored::Skipped);
         }
         let from = p.node_index();
-        if let Some(upd) = p.restore_payload() {
-            let sid = node.session_id().ok_or(Error::NoNode)?;
-            let resp = node
-                .rest()
-                .update_player(&sid, p.guild, &upd, false)
-                .await?;
-            p.apply_player(&resp);
+        let gen = node.session_gen();
+        // Skip the PATCH when this session already has the player (a user
+        // write rebuilt it first, or the session survived).
+        if !p.written_on(node.index, gen) {
+            if let Some(upd) = p.restore_payload() {
+                let sid = node.session_id().ok_or(Error::NoNode)?;
+                let resp = node
+                    .rest()
+                    .update_player(&sid, p.guild, &upd, false)
+                    .await?;
+                p.apply_player(&resp);
+                p.mark_written(node.index, gen);
+                if let Some(vs) = upd.voice {
+                    lock(&p.voice).mark_sent(vs);
+                }
+            }
         }
         p.set_node(node.index);
         p.orphaned.store(false, Ordering::Release);
@@ -396,7 +448,6 @@ impl Hub {
 mod tests {
     use super::*;
     use crate::config::NodeConfig;
-    use crate::state::lock;
     use larplink_model::VoiceState;
 
     fn hub() -> Arc<Hub> {

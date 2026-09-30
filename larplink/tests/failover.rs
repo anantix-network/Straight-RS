@@ -244,3 +244,80 @@ async fn pending_failover_timer_does_not_migrate_after_shutdown() {
         assert!(!matches!(e, Event::PlayerMigrated { .. }));
     }
 }
+
+/// I1: a user write that reaches a node after a lost session, before the
+/// restore ran, must carry the restore state instead of clobbering it.
+#[tokio::test]
+async fn write_racing_a_session_restore_carries_the_restore_state() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let mock = Mock::start().await;
+    mock.state.forget_players_on_new_session.store(true, SeqCst);
+    let c = client_with(&[&mock], |cfg| {
+        cfg.request_timeout = Duration::from_secs(10)
+    })
+    .await;
+    let p = join_and_play(&c).await;
+    let mut rx = c.events();
+    // w1 holds the player's gate across the reconnect (slow, then fails),
+    // so w2 is queued on the gate ahead of the restore task.
+    mock.state.fail_next_patches.store(1, SeqCst);
+    mock.state.patch_delay_ms.store(1500, SeqCst);
+    let before = mock.requests_matching("PATCH", G).len();
+    let (a, b) = (p.clone(), p.clone());
+    let w1 = tokio::spawn(async move { a.set_volume(50).await });
+    eventually(LONG, || mock.requests_matching("PATCH", G).len() > before).await;
+    mock.state.patch_delay_ms.store(0, SeqCst);
+    let w2 = tokio::spawn(async move { b.set_volume(55).await });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    mock.close_ws(); // reconnects with resumed=false: a blank session
+    next_event(&mut rx, |e| {
+        matches!(e, Event::Ready { resumed: false, .. })
+    })
+    .await;
+    assert!(w1.await.unwrap().is_err());
+    w2.await.unwrap().unwrap();
+    let patches = mock.requests_matching("PATCH", G);
+    let w2_body = &patches
+        .iter()
+        .find(|r| r.body["volume"] == 55)
+        .expect("w2 PATCH")
+        .body;
+    assert_eq!(w2_body["track"]["encoded"], "ABC");
+    assert_eq!(w2_body["voice"]["token"], "tok");
+    assert_eq!(&*p.track().unwrap().encoded, "ABC");
+    assert_eq!(p.volume(), 55);
+    // The pending restore sees the player already rebuilt on this session.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(mock.requests_matching("PATCH", G).len(), patches.len());
+    assert_eq!(&*p.track().unwrap().encoded, "ABC");
+    assert_eq!(p.volume(), 55);
+}
+
+/// I5: a player orphaned by a failed migration is moved inline by the next
+/// write while a healthy node exists.
+#[tokio::test]
+async fn orphan_from_a_failed_migration_is_rescued_by_the_next_write() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (a, b) = (Mock::start().await, Mock::start().await);
+    let c = client_with(&[&a, &b], |cfg| {
+        cfg.failover_grace = Duration::from_millis(300)
+    })
+    .await;
+    let p = join_and_play(&c).await;
+    assert_eq!(p.node_index(), Some(0));
+    b.state.fail_next_patches.store(1, SeqCst);
+    let mut rx = c.events();
+    a.kill();
+    eventually(LONG, || !b.requests_matching("PATCH", G).is_empty()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await; // migration failed -> orphaned
+    assert_eq!(p.node_index(), Some(0));
+    p.set_volume(30).await.unwrap();
+    assert_eq!(p.node_index(), Some(1));
+    let last = b.requests_matching("PATCH", G).pop().unwrap().body;
+    assert_eq!(last["track"]["encoded"], "ABC");
+    assert_eq!(last["voice"]["token"], "tok");
+    assert_eq!(last["volume"], 30);
+    let e = next_event(&mut rx, |e| matches!(e, Event::PlayerMigrated { .. })).await;
+    assert!(matches!(e, Event::PlayerMigrated { from: 0, to: 1, .. }));
+    assert_eq!(&*p.track().unwrap().encoded, "ABC");
+}
