@@ -2,10 +2,12 @@
 
 A fast, easy-to-use **[Lavalink v4](https://lavalink.dev) client for Rust.**
 
-Lavalink is a standalone audio server for Discord bots. Straight-RS is the
-part that lives in your bot: it connects to one or more Lavalink servers,
-loads tracks, controls playback, and keeps everything running when a server
-restarts or drops.
+Lavalink is a standalone audio server for Discord bots. Straight-RS connects
+your Rust process to one or more Lavalink servers, loads tracks, and controls
+playback. Choose whether that process is your bot or a separate playback worker;
+any process failure stops its in-memory client, Gateway session, and voice
+coordination. Lavalink's resume window may help with a transient reconnect, but
+it does not keep a dead application process alive.
 
 - **Works with any Discord library.** Nothing is tied to serenity, twilight or
   songbird. Small optional adapters are included for all three.
@@ -39,6 +41,19 @@ Optional features:
 
 ```toml
 straight-rs = { git = "https://github.com/anantix-network/Straight-RS", features = ["twilight", "tls"] }
+```
+
+For the Serenity voice-event adapter:
+
+```toml
+straight-rs = { git = "https://github.com/anantix-network/Straight-RS", features = ["serenity", "tls"] }
+```
+
+The separate worker is a different crate; its `serenity` feature enables its
+optional Serenity dependency and the matching `straight-rs` adapter:
+
+```toml
+straight-rs-worker = { git = "https://github.com/anantix-network/Straight-RS", features = ["serenity"] }
 ```
 
 ## Quick start
@@ -104,6 +119,138 @@ bot joins. Your Discord library receives them as events; you just pass them on:
 - **Joining and leaving channels:** implement the small `VoiceGateway` trait
   (`join` / `leave`) and pass it to `ClientBuilder::gateway`. Then
   `player.join(channel)` and `player.leave()` work.
+
+### Separate playback worker
+
+The optional `straight-rs-worker` crate owns the Lavalink client, the Discord
+Gateway session used for voice state/commands, and an authenticated HTTP control
+API in one process. Depend on it from Git with the adapter feature you use:
+
+```toml
+straight-rs-worker = { git = "https://github.com/anantix-network/Straight-RS", features = ["serenity"] }
+```
+
+The worker owns its bot Gateway shards. **Do not also open a Gateway session for
+the same bot token in the command/API application**: duplicate shard sessions
+conflict. The intended topology is:
+
+```text
+Discord HTTP interactions -> Command/API app -- bearer-auth HTTP --> Playback worker
+                                                                  |-- Discord Gateway shards
+                                                                  |-- Lavalink client
+                                                                  `-- voice coordination
+```
+
+Keep chat commands and interaction handling in another process only if that
+process uses non-Gateway ingress, such as Discord HTTP interactions, then have
+it call the worker's HTTP API. Worker plugins receive only the documented
+sanitized playback/node events; they do not receive Discord interactions.
+
+A minimal composition looks like this (the application supplies a
+`GatewayDriver`; see the adapter status note below):
+
+```rust,no_run
+use std::net::SocketAddr;
+use straight_rs::{NodeConfig, UserId};
+use straight_rs_worker::{SecretString, WorkerBuilder, WorkerConfigBuilder};
+use tokio::sync::watch;
+
+async fn run(gateway: impl straight_rs_worker::GatewayDriver) -> Result<(), Box<dyn std::error::Error>> {
+    let config = WorkerConfigBuilder::new(
+        UserId(123456789012345678),
+        SecretString::new(std::env::var("DISCORD_BOT_TOKEN")?),
+        SecretString::new(std::env::var("WORKER_API_TOKEN")?), // at least 32 bytes
+        vec![NodeConfig::new("127.0.0.1:2333", std::env::var("LAVALINK_PASSWORD")?)],
+    )
+    .bind_addr("127.0.0.1:8080".parse::<SocketAddr>()?, false)
+    .build()?;
+
+    let mut worker = WorkerBuilder::new(config, gateway).build().await?;
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = shutdown_tx.send(true);
+    });
+    worker.serve(shutdown_rx).await?;
+    Ok(())
+}
+```
+
+Install the Git `serenity` feature to compile the optional Serenity dependency
+and Straight-RS voice-event adapter. **The worker's current
+`SerenityGatewayDriver` is a stub that returns “Serenity adapter is not
+implemented”; it is not a functioning production Gateway driver.** The worker
+runtime requires a functioning `GatewayDriver` implementation to provide the
+bot Gateway session and voice operations. Do not treat enabling the feature or
+building the `worker-serenity` example as proof that a usable Gateway driver is
+available.
+
+Register plugins statically before building the worker:
+
+```rust,no_run
+let worker = WorkerBuilder::new(config, gateway)
+    .optional_plugin(queue_plugin) // startup continues if this plugin fails
+    // .plugin(required_plugin)     // required plugin startup failure aborts build
+    .build()
+    .await?;
+```
+
+Plugins are trusted in-process code, not sandboxes. They receive whitelisted
+sanitized playback/node events (track `user_data` and Lavalink plugin metadata
+are removed) and a restricted `WorkerContext` playback API; they cannot receive
+Discord interactions through the worker plugin interface. See
+[`queue-plugin`](crates/straight-rs-worker/examples/queue-plugin.rs) for the
+example implementation.
+
+The worker binds to `127.0.0.1:8080` by default and requires a non-empty API
+bearer token of at least 32 bytes. Keep the API loopback-bound unless remote
+access is necessary; remote binds require explicit opt-in via
+`.bind_addr(address, true)` and should be protected by a private network or TLS
+reverse proxy. Store bot, Lavalink, and API secrets in a secret manager or
+process environment, never in source control. `/healthz` is liveness (HTTP 200
+while the API responds, even if not ready); `/readyz` returns 200 only when the
+Gateway and Lavalink are ready, otherwise 503. Both probes are unauthenticated;
+playback/control endpoints require `Authorization: Bearer $WORKER_API_TOKEN`.
+
+Example API calls (guild and channel IDs are decimal strings):
+
+```sh
+curl http://127.0.0.1:8080/healthz
+curl http://127.0.0.1:8080/readyz
+curl -H "Authorization: Bearer $WORKER_API_TOKEN" \\
+  http://127.0.0.1:8080/v1/guilds/123456789012345678/player
+curl -X POST -H "Authorization: Bearer $WORKER_API_TOKEN" \\
+  -H 'Content-Type: application/json' \\
+  -d '{"channel_id":"234567890123456789"}' \\
+  http://127.0.0.1:8080/v1/guilds/123456789012345678/join
+curl -X POST -H "Authorization: Bearer $WORKER_API_TOKEN" \\
+  -H 'Content-Type: application/json' -d '{"identifier":"ytsearch:lofi"}' \\
+  http://127.0.0.1:8080/v1/guilds/123456789012345678/play
+```
+
+Run the worker under a process supervisor (for example, systemd with
+`Restart=on-failure`) or a container orchestrator with liveness/readiness probes
+and graceful termination. A unit for your compiled application can use this
+pattern (replace the executable path and service account for your deployment):
+
+```ini
+[Service]
+ExecStart=/opt/my-bot/bin/playback-worker
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+```
+
+Configure container health checks to use `/healthz` for liveness and `/readyz`
+for readiness; avoid restarting just because the worker is not ready during
+startup. The worker, its Gateway session, its Lavalink client, and the voice
+connection coordination must all remain alive in the worker process for playback
+control and voice to continue. If that process exits or is killed, its Gateway
+disconnects and its in-memory player/worker/plugin state is gone; a separate
+command/API process cannot keep that playback alive. A new worker may reconnect
+within Lavalink's configured session-resume window, but process supervision is
+still required and playback continuity is not guaranteed across process death.
 
 ## Controlling playback
 

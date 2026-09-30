@@ -14,5 +14,17 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
       - run: cargo test --workspace --all-features
+      - name: Test Serenity adapter feature
+        run: cargo test -p straight-rs --no-default-features --features serenity
+      - name: Test Twilight adapter feature
+        run: cargo test -p straight-rs --no-default-features --features twilight
+      - name: Test Songbird adapter feature
+        run: cargo test -p straight-rs --no-default-features --features songbird
+      - name: Check worker examples without optional adapters
+        run: cargo check -p straight-rs-worker --examples
+      - name: Check worker examples with Serenity feature
+        run: cargo check -p straight-rs-worker --examples --features serenity
+      - name: Check worker examples with Twilight feature
+        run: cargo check -p straight-rs-worker --examples --features twilight
       - run: cargo build -p straight-rs --examples
       - run: cargo bench -p straight-rs --no-run
