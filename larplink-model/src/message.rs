@@ -39,13 +39,30 @@ pub enum Event {
     #[serde(rename = "TrackStartEvent", rename_all = "camelCase")]
     TrackStart { guild_id: GuildId, track: Track },
     #[serde(rename = "TrackEndEvent", rename_all = "camelCase")]
-    TrackEnd { guild_id: GuildId, track: Track, reason: TrackEndReason },
+    TrackEnd {
+        guild_id: GuildId,
+        track: Track,
+        reason: TrackEndReason,
+    },
     #[serde(rename = "TrackExceptionEvent", rename_all = "camelCase")]
-    TrackException { guild_id: GuildId, track: Track, exception: Exception },
+    TrackException {
+        guild_id: GuildId,
+        track: Track,
+        exception: Exception,
+    },
     #[serde(rename = "TrackStuckEvent", rename_all = "camelCase")]
-    TrackStuck { guild_id: GuildId, track: Track, threshold_ms: u64 },
+    TrackStuck {
+        guild_id: GuildId,
+        track: Track,
+        threshold_ms: u64,
+    },
     #[serde(rename = "WebSocketClosedEvent", rename_all = "camelCase")]
-    WebSocketClosed { guild_id: GuildId, code: u16, reason: String, by_remote: bool },
+    WebSocketClosed {
+        guild_id: GuildId,
+        code: u16,
+        reason: String,
+        by_remote: bool,
+    },
 }
 
 impl Event {
@@ -67,7 +84,10 @@ pub enum WsMessage {
     Stats(Stats),
     Event(Event),
     /// Unknown op / unknown event type / malformed known message (plugins).
-    Unknown { op: String, payload: Value },
+    Unknown {
+        op: String,
+        payload: Value,
+    },
 }
 
 #[derive(Deserialize)]
@@ -91,7 +111,11 @@ impl WsMessage {
             });
         }
         let payload: Value = serde_json::from_str(text)?;
-        let op = payload.get("op").and_then(Value::as_str).unwrap_or("").to_owned();
+        let op = payload
+            .get("op")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
         Ok(Self::Unknown { op, payload })
     }
 }

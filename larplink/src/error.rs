@@ -14,7 +14,12 @@ pub enum Error {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("lavalink error {status} {error}: {message} ({path})")]
-    Lavalink { status: u16, error: String, message: String, path: String },
+    Lavalink {
+        status: u16,
+        error: String,
+        message: String,
+        path: String,
+    },
     #[error("no lavalink node available")]
     NoNode,
     #[error("request timed out")]

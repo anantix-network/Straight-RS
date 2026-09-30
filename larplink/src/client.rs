@@ -35,11 +35,26 @@ pub struct ClientBuilder {
 }
 
 impl ClientBuilder {
-    pub fn node(mut self, cfg: NodeConfig) -> Self { self.nodes.push(cfg); self }
-    pub fn strategy(mut self, s: Strategy) -> Self { self.strategy = s; self }
-    pub fn client_name(mut self, n: impl Into<String>) -> Self { self.client_name = n.into(); self }
-    pub fn event_capacity(mut self, n: usize) -> Self { self.event_capacity = n.max(1); self }
-    pub fn gateway(mut self, g: Arc<dyn VoiceGateway>) -> Self { self.gateway = Some(g); self }
+    pub fn node(mut self, cfg: NodeConfig) -> Self {
+        self.nodes.push(cfg);
+        self
+    }
+    pub fn strategy(mut self, s: Strategy) -> Self {
+        self.strategy = s;
+        self
+    }
+    pub fn client_name(mut self, n: impl Into<String>) -> Self {
+        self.client_name = n.into();
+        self
+    }
+    pub fn event_capacity(mut self, n: usize) -> Self {
+        self.event_capacity = n.max(1);
+        self
+    }
+    pub fn gateway(mut self, g: Arc<dyn VoiceGateway>) -> Self {
+        self.gateway = Some(g);
+        self
+    }
 
     /// Spawns one task per node; does not wait for connections (see `wait_ready`).
     pub async fn build(self) -> Result<LavalinkClient> {
@@ -73,7 +88,10 @@ impl ClientBuilder {
         for node in &hub.nodes {
             tokio::spawn(node.clone().run(hub.clone(), rx.clone()));
         }
-        Ok(LavalinkClient { hub, guard: Arc::new(ShutdownGuard(tx)) })
+        Ok(LavalinkClient {
+            hub,
+            guard: Arc::new(ShutdownGuard(tx)),
+        })
     }
 }
 
@@ -114,15 +132,30 @@ impl LavalinkClient {
     }
 
     pub async fn load(&self, identifier: &str) -> Result<LoadResult> {
-        self.hub.pick_node(None).ok_or(Error::NoNode)?.rest().load_tracks(identifier).await
+        self.hub
+            .pick_node(None)
+            .ok_or(Error::NoNode)?
+            .rest()
+            .load_tracks(identifier)
+            .await
     }
 
     pub async fn decode_track(&self, encoded: &str) -> Result<Track> {
-        self.hub.pick_node(None).ok_or(Error::NoNode)?.rest().decode_track(encoded).await
+        self.hub
+            .pick_node(None)
+            .ok_or(Error::NoNode)?
+            .rest()
+            .decode_track(encoded)
+            .await
     }
 
     pub async fn decode_tracks(&self, encoded: &[String]) -> Result<Vec<Track>> {
-        self.hub.pick_node(None).ok_or(Error::NoNode)?.rest().decode_tracks(encoded).await
+        self.hub
+            .pick_node(None)
+            .ok_or(Error::NoNode)?
+            .rest()
+            .decode_tracks(encoded)
+            .await
     }
 
     /// Stops all node tasks immediately.

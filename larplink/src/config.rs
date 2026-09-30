@@ -39,7 +39,8 @@ impl NodeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn defaults() {
+    #[test]
+    fn defaults() {
         let c = NodeConfig::new("localhost:2333", "pw");
         assert!(!c.secure);
         assert_eq!(c.resume_timeout_secs, 60);

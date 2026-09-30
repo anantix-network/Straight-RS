@@ -12,13 +12,32 @@ macro_rules! opt_struct {
     };
 }
 
-opt_struct!(Karaoke { level, mono_level, filter_band, filter_width });
+opt_struct!(Karaoke {
+    level,
+    mono_level,
+    filter_band,
+    filter_width
+});
 opt_struct!(Timescale { speed, pitch, rate });
 opt_struct!(Tremolo { frequency, depth });
 opt_struct!(Vibrato { frequency, depth });
 opt_struct!(Rotation { rotation_hz });
-opt_struct!(Distortion { sin_offset, sin_scale, cos_offset, cos_scale, tan_offset, tan_scale, offset, scale });
-opt_struct!(ChannelMix { left_to_left, left_to_right, right_to_left, right_to_right });
+opt_struct!(Distortion {
+    sin_offset,
+    sin_scale,
+    cos_offset,
+    cos_scale,
+    tan_offset,
+    tan_scale,
+    offset,
+    scale
+});
+opt_struct!(ChannelMix {
+    left_to_left,
+    left_to_right,
+    right_to_left,
+    right_to_right
+});
 opt_struct!(LowPass { smoothing });
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

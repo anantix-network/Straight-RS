@@ -1,8 +1,8 @@
 use crate::hub::Hub;
 use crate::state::{lock, PlayerInner, PlayerSnapshot};
 use crate::{
-    ChannelId, Error, Event, Filters, GuildId, LavalinkClient, Result, Track, UpdatePlayer, UpdateTrack,
-    VoiceOutcome, VoiceServerUpdate, VoiceState, VoiceStateUpdate,
+    ChannelId, Error, Event, Filters, GuildId, LavalinkClient, Result, Track, UpdatePlayer,
+    UpdateTrack, VoiceOutcome, VoiceServerUpdate, VoiceState, VoiceStateUpdate,
 };
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -43,27 +43,50 @@ impl LavalinkClient {
             .entry(guild)
             .or_insert_with(|| Arc::new(PlayerInner::new(guild)))
             .clone();
-        Player { hub: self.hub.clone(), inner }
+        Player {
+            hub: self.hub.clone(),
+            inner,
+        }
     }
 
     pub fn get_player(&self, guild: impl Into<GuildId>) -> Option<Player> {
         let inner = self.hub.players.get(&guild.into())?.clone();
-        Some(Player { hub: self.hub.clone(), inner })
+        Some(Player {
+            hub: self.hub.clone(),
+            inner,
+        })
     }
 }
 
 impl Player {
-    pub fn guild_id(&self) -> GuildId { self.inner.guild }
-    pub fn snapshot(&self) -> Arc<PlayerSnapshot> { self.inner.snapshot() }
+    pub fn guild_id(&self) -> GuildId {
+        self.inner.guild
+    }
+    pub fn snapshot(&self) -> Arc<PlayerSnapshot> {
+        self.inner.snapshot()
+    }
     /// Interpolated position in ms; never awaits.
-    pub fn position(&self) -> u64 { self.inner.snapshot().position_now() }
-    pub fn track(&self) -> Option<Arc<Track>> { self.inner.snapshot().track.clone() }
-    pub fn is_paused(&self) -> bool { self.inner.snapshot().paused }
-    pub fn volume(&self) -> u16 { self.inner.snapshot().volume }
-    pub fn node_index(&self) -> Option<usize> { self.inner.node_index() }
+    pub fn position(&self) -> u64 {
+        self.inner.snapshot().position_now()
+    }
+    pub fn track(&self) -> Option<Arc<Track>> {
+        self.inner.snapshot().track.clone()
+    }
+    pub fn is_paused(&self) -> bool {
+        self.inner.snapshot().paused
+    }
+    pub fn volume(&self) -> u16 {
+        self.inner.snapshot().volume
+    }
+    pub fn node_index(&self) -> Option<usize> {
+        self.inner.node_index()
+    }
 
     pub fn events(&self) -> PlayerEvents {
-        PlayerEvents { rx: self.hub.events.subscribe(), guild: self.inner.guild }
+        PlayerEvents {
+            rx: self.hub.events.subscribe(),
+            guild: self.inner.guild,
+        }
     }
 
     pub async fn update(&self, upd: UpdatePlayer) -> Result<()> {
@@ -78,7 +101,10 @@ impl Player {
         }
         let node = self.hub.node_for(&self.inner)?;
         let sid = node.session_id().ok_or(Error::NoNode)?;
-        let resp = node.rest().update_player(&sid, self.inner.guild, &upd, no_replace).await?;
+        let resp = node
+            .rest()
+            .update_player(&sid, self.inner.guild, &upd, no_replace)
+            .await?;
         self.inner.apply_player(&resp);
         Ok(())
     }
@@ -86,7 +112,11 @@ impl Player {
     pub async fn play(&self, track: &Track) -> Result<()> {
         let user_data = (!track.user_data.is_null()).then(|| track.user_data.clone());
         self.update(UpdatePlayer {
-            track: Some(UpdateTrack { encoded: Some(Some(track.encoded.clone())), user_data, ..Default::default() }),
+            track: Some(UpdateTrack {
+                encoded: Some(Some(track.encoded.clone())),
+                user_data,
+                ..Default::default()
+            }),
             ..Default::default()
         })
         .await
@@ -94,27 +124,46 @@ impl Player {
 
     pub async fn stop(&self) -> Result<()> {
         self.update(UpdatePlayer {
-            track: Some(UpdateTrack { encoded: Some(None), ..Default::default() }),
+            track: Some(UpdateTrack {
+                encoded: Some(None),
+                ..Default::default()
+            }),
             ..Default::default()
         })
         .await
     }
 
     pub async fn pause(&self, paused: bool) -> Result<()> {
-        self.update(UpdatePlayer { paused: Some(paused), ..Default::default() }).await
+        self.update(UpdatePlayer {
+            paused: Some(paused),
+            ..Default::default()
+        })
+        .await
     }
 
     pub async fn seek(&self, position_ms: u64) -> Result<()> {
-        self.update(UpdatePlayer { position: Some(position_ms), ..Default::default() }).await
+        self.update(UpdatePlayer {
+            position: Some(position_ms),
+            ..Default::default()
+        })
+        .await
     }
 
     /// Lavalink accepts 0..=1000.
     pub async fn set_volume(&self, volume: u16) -> Result<()> {
-        self.update(UpdatePlayer { volume: Some(volume.min(1000)), ..Default::default() }).await
+        self.update(UpdatePlayer {
+            volume: Some(volume.min(1000)),
+            ..Default::default()
+        })
+        .await
     }
 
     pub async fn set_filters(&self, filters: Filters) -> Result<()> {
-        self.update(UpdatePlayer { filters: Some(filters), ..Default::default() }).await
+        self.update(UpdatePlayer {
+            filters: Some(filters),
+            ..Default::default()
+        })
+        .await
     }
 
     /// Destroys the player on its node and forgets local state. A 404 is not an error.
@@ -128,7 +177,9 @@ impl Player {
         let res = self.destroy_remote(guild).await;
         // Forget local state only after the DELETE finished, so no new player
         // (and gate) for this guild can overlap it.
-        self.hub.players.remove_if(&guild, |_, v| Arc::ptr_eq(v, &self.inner));
+        self.hub
+            .players
+            .remove_if(&guild, |_, v| Arc::ptr_eq(v, &self.inner));
         res
     }
 
@@ -136,7 +187,9 @@ impl Player {
         let Some(node) = self.inner.node_index().and_then(|i| self.hub.nodes.get(i)) else {
             return Ok(());
         };
-        let Some(sid) = node.session_id() else { return Ok(()) };
+        let Some(sid) = node.session_id() else {
+            return Ok(());
+        };
         if !node.is_ready() {
             return Ok(());
         }
@@ -156,7 +209,10 @@ impl Player {
     }
 
     fn gateway(&self) -> Result<&Arc<dyn crate::VoiceGateway>> {
-        self.hub.gateway.as_ref().ok_or_else(|| Error::Config("no voice gateway configured".into()))
+        self.hub
+            .gateway
+            .as_ref()
+            .ok_or_else(|| Error::Config("no voice gateway configured".into()))
     }
 }
 
@@ -165,7 +221,11 @@ impl Player {
         match outcome {
             VoiceOutcome::Pending => Ok(()),
             VoiceOutcome::Ready(vs) => {
-                self.update(UpdatePlayer { voice: Some(vs.clone()), ..Default::default() }).await?;
+                self.update(UpdatePlayer {
+                    voice: Some(vs.clone()),
+                    ..Default::default()
+                })
+                .await?;
                 // Only after the PATCH succeeded, so a failed one is retried by the next identical update.
                 lock(&self.inner.voice).mark_sent(vs);
                 Ok(())
@@ -179,7 +239,11 @@ impl LavalinkClient {
     /// Feed `VOICE_STATE_UPDATE`. `channel_id: None` destroys the player.
     ///
     /// Callers must only pass voice events for the bot's own user.
-    pub async fn voice_state_update(&self, guild: impl Into<GuildId>, upd: VoiceStateUpdate) -> Result<()> {
+    pub async fn voice_state_update(
+        &self,
+        guild: impl Into<GuildId>,
+        upd: VoiceStateUpdate,
+    ) -> Result<()> {
         let p = self.player(guild);
         let outcome = lock(&p.inner.voice).update_state(upd);
         p.apply_voice(outcome).await
@@ -188,7 +252,11 @@ impl LavalinkClient {
     /// Feed `VOICE_SERVER_UPDATE`.
     ///
     /// Callers must only pass voice events for the bot's own user.
-    pub async fn voice_server_update(&self, guild: impl Into<GuildId>, upd: VoiceServerUpdate) -> Result<()> {
+    pub async fn voice_server_update(
+        &self,
+        guild: impl Into<GuildId>,
+        upd: VoiceServerUpdate,
+    ) -> Result<()> {
         let p = self.player(guild);
         let outcome = lock(&p.inner.voice).update_server(upd);
         p.apply_voice(outcome).await
@@ -198,6 +266,8 @@ impl LavalinkClient {
     ///
     /// Callers must only pass voice events for the bot's own user.
     pub async fn voice_update(&self, guild: impl Into<GuildId>, vs: VoiceState) -> Result<()> {
-        self.player(guild).apply_voice(VoiceOutcome::Ready(vs)).await
+        self.player(guild)
+            .apply_voice(VoiceOutcome::Ready(vs))
+            .await
     }
 }

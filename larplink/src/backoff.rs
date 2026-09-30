@@ -8,7 +8,11 @@ pub(crate) struct Backoff {
 
 impl Backoff {
     pub(crate) fn new(base: Duration, max: Duration) -> Self {
-        Self { base, max, attempt: 0 }
+        Self {
+            base,
+            max,
+            attempt: 0,
+        }
     }
 
     /// `jitter` in `[0, 1]`: 1.0 = full delay, 0.0 = half of it.
@@ -49,6 +53,8 @@ mod tests {
     #[test]
     fn huge_attempt_counts_do_not_overflow() {
         let mut b = Backoff::new(Duration::from_millis(500), Duration::from_secs(30));
-        for _ in 0..1000 { assert!(b.next_delay(0.5) <= Duration::from_secs(30)); }
+        for _ in 0..1000 {
+            assert!(b.next_delay(0.5) <= Duration::from_secs(30));
+        }
     }
 }

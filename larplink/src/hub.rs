@@ -52,7 +52,11 @@ impl Hub {
             .nodes
             .iter()
             .filter(|n| n.is_ready() && Some(n.index) != exclude)
-            .map(|n| NodeView { index: n.index, penalty: n.penalty(), players: n.players() })
+            .map(|n| NodeView {
+                index: n.index,
+                penalty: n.penalty(),
+                players: n.players(),
+            })
             .collect();
         pick(&self.strategy, &views, &self.rr).and_then(|i| self.nodes.get(i).cloned())
     }
@@ -62,13 +66,21 @@ impl Hub {
         match p.node_index() {
             Some(i) => {
                 let n = self.nodes.get(i).ok_or(Error::NoNode)?;
-                if n.is_ready() { Ok(n.clone()) } else { Err(Error::NoNode) }
+                if n.is_ready() {
+                    Ok(n.clone())
+                } else {
+                    Err(Error::NoNode)
+                }
             }
             None => {
                 let n = self.pick_node(None).ok_or(Error::NoNode)?;
                 let i = p.assign_node(n.index);
                 let n = self.nodes.get(i).ok_or(Error::NoNode)?;
-                if n.is_ready() { Ok(n.clone()) } else { Err(Error::NoNode) }
+                if n.is_ready() {
+                    Ok(n.clone())
+                } else {
+                    Err(Error::NoNode)
+                }
             }
         }
     }
@@ -112,7 +124,11 @@ impl Hub {
                         p.apply_update(&u.state);
                     }
                 }
-                self.emit(Event::PlayerUpdate { node: node.index, guild: u.guild_id, state: u.state });
+                self.emit(Event::PlayerUpdate {
+                    node: node.index,
+                    guild: u.guild_id,
+                    state: u.state,
+                });
             }
             WsMessage::Event(ev) => {
                 if let Some(p) = self.players.get(&ev.guild_id()) {
@@ -128,7 +144,11 @@ impl Hub {
                 self.emit(Event::from_model(node.index, ev));
             }
             WsMessage::Unknown { op, payload } => {
-                self.emit(Event::Unknown { node: node.index, op, payload });
+                self.emit(Event::Unknown {
+                    node: node.index,
+                    op,
+                    payload,
+                });
             }
             WsMessage::Ready(_) | WsMessage::Stats(_) => {}
         }
@@ -136,7 +156,12 @@ impl Hub {
 
     /// Re-create `p` on `node` from client-side state, provided `expect` still
     /// holds once the player's gate is taken.
-    pub(crate) async fn restore_to(&self, p: &Arc<PlayerInner>, node: &Arc<Node>, expect: Expect) -> Result<Restored> {
+    pub(crate) async fn restore_to(
+        &self,
+        p: &Arc<PlayerInner>,
+        node: &Arc<Node>,
+        expect: Expect,
+    ) -> Result<Restored> {
         let _gate = p.gate.lock().await;
         if !self.expected(p, node.index, expect) {
             return Ok(Restored::Skipped);
@@ -144,7 +169,10 @@ impl Hub {
         let from = p.node_index();
         if let Some(upd) = p.restore_payload() {
             let sid = node.session_id().ok_or(Error::NoNode)?;
-            let resp = node.rest().update_player(&sid, p.guild, &upd, false).await?;
+            let resp = node
+                .rest()
+                .update_player(&sid, p.guild, &upd, false)
+                .await?;
             p.apply_player(&resp);
         }
         p.set_node(node.index);
@@ -164,7 +192,10 @@ impl Hub {
             Expect::Restore => !orphaned && p.node_index() == Some(target),
             Expect::Migrate { from, epoch } => {
                 p.node_index() == Some(from)
-                    && self.nodes.get(from).is_some_and(|n| n.epoch() == epoch && !n.is_ready())
+                    && self
+                        .nodes
+                        .get(from)
+                        .is_some_and(|n| n.epoch() == epoch && !n.is_ready())
             }
         }
     }
@@ -178,13 +209,19 @@ impl Hub {
     }
 
     fn players_where(&self, f: impl Fn(&PlayerInner) -> bool) -> Vec<Arc<PlayerInner>> {
-        self.players.iter().filter(|e| f(e.value())).map(|e| e.value().clone()).collect()
+        self.players
+            .iter()
+            .filter(|e| f(e.value()))
+            .map(|e| e.value().clone())
+            .collect()
     }
 
     /// Server lost our session: put every player of `node` back.
     pub(crate) async fn restore_players(&self, node: &Arc<Node>) {
         let idx = node.index;
-        for p in self.players_where(|p| p.node_index() == Some(idx) && !p.orphaned.load(Ordering::Acquire)) {
+        for p in self
+            .players_where(|p| p.node_index() == Some(idx) && !p.orphaned.load(Ordering::Acquire))
+        {
             if let Err(e) = self.restore_to(&p, node, Expect::Restore).await {
                 tracing::warn!(guild = %p.guild, error = %e, "failed to restore player after session loss");
             }
@@ -202,11 +239,18 @@ impl Hub {
                 self.orphan(&p, idx, epoch).await;
                 continue;
             };
-            match self.restore_to(&p, &target, Expect::Migrate { from: idx, epoch }).await {
+            match self
+                .restore_to(&p, &target, Expect::Migrate { from: idx, epoch })
+                .await
+            {
                 Ok(Restored::Skipped) => {}
                 Ok(Restored::Moved { .. }) => {
                     self.stale.insert((idx, p.guild));
-                    self.emit(Event::PlayerMigrated { guild: p.guild, from: idx, to: target.index });
+                    self.emit(Event::PlayerMigrated {
+                        guild: p.guild,
+                        from: idx,
+                        to: target.index,
+                    });
                 }
                 Err(e) => {
                     tracing::warn!(guild = %p.guild, error = %e, "player migration failed");
@@ -224,7 +268,11 @@ impl Hub {
                 Ok(Restored::Moved { from }) => {
                     if let Some(from) = from.filter(|f| *f != node.index) {
                         self.stale.insert((from, p.guild));
-                        self.emit(Event::PlayerMigrated { guild: p.guild, from, to: node.index });
+                        self.emit(Event::PlayerMigrated {
+                            guild: p.guild,
+                            from,
+                            to: node.index,
+                        });
                     }
                 }
                 Err(e) => tracing::warn!(guild = %p.guild, error = %e, "orphan rescue failed"),
@@ -234,13 +282,21 @@ impl Hub {
 
     /// An old node is back: remove players we migrated away from it.
     pub(crate) async fn cleanup_stale(&self, node: &Arc<Node>, resumed: bool) {
-        let mine: Vec<GuildId> = self.stale.iter().filter(|e| e.0 == node.index).map(|e| e.1).collect();
+        let mine: Vec<GuildId> = self
+            .stale
+            .iter()
+            .filter(|e| e.0 == node.index)
+            .map(|e| e.1)
+            .collect();
         for guild in mine {
             self.stale.remove(&(node.index, guild));
             if !resumed {
                 continue; // the server forgot the player already
             }
-            let back_here = self.players.get(&guild).is_some_and(|p| p.node_index() == Some(node.index));
+            let back_here = self
+                .players
+                .get(&guild)
+                .is_some_and(|p| p.node_index() == Some(node.index));
             if back_here {
                 continue;
             }
@@ -261,7 +317,9 @@ mod tests {
     use larplink_model::VoiceState;
 
     fn hub() -> Arc<Hub> {
-        let nodes = (0..2).map(|i| Node::new(i, NodeConfig::new("127.0.0.1:1", "pw"), "test")).collect();
+        let nodes = (0..2)
+            .map(|i| Node::new(i, NodeConfig::new("127.0.0.1:1", "pw"), "test"))
+            .collect();
         Arc::new(Hub {
             user_id: UserId(1),
             client_name: "test".into(),
@@ -279,7 +337,12 @@ mod tests {
     /// Give `p` a restore payload. The test nodes have no session, so any
     /// restore that got past its precondition would fail with `NoNode`.
     fn with_payload(p: &PlayerInner) {
-        let vs = VoiceState { token: "t".into(), endpoint: "e".into(), session_id: "s".into(), channel_id: None };
+        let vs = VoiceState {
+            token: "t".into(),
+            endpoint: "e".into(),
+            session_id: "s".into(),
+            channel_id: None,
+        };
         lock(&p.voice).mark_sent(vs);
     }
 
@@ -308,15 +371,42 @@ mod tests {
         p.set_node(1); // already migrated away from node 0
         let r = h.restore_to(&p, &h.nodes[0], Expect::Restore).await;
         assert!(matches!(r, Ok(Restored::Skipped)));
-        let r = h.restore_to(&p, &h.nodes[0], Expect::Migrate { from: 0, epoch: h.nodes[0].epoch() }).await;
+        let r = h
+            .restore_to(
+                &p,
+                &h.nodes[0],
+                Expect::Migrate {
+                    from: 0,
+                    epoch: h.nodes[0].epoch(),
+                },
+            )
+            .await;
         assert!(matches!(r, Ok(Restored::Skipped)));
         p.set_node(0);
         let stale_epoch = h.nodes[0].epoch();
         h.nodes[0].bump_epoch(); // node 0 flapped: a newer outage
-        let r = h.restore_to(&p, &h.nodes[1], Expect::Migrate { from: 0, epoch: stale_epoch }).await;
+        let r = h
+            .restore_to(
+                &p,
+                &h.nodes[1],
+                Expect::Migrate {
+                    from: 0,
+                    epoch: stale_epoch,
+                },
+            )
+            .await;
         assert!(matches!(r, Ok(Restored::Skipped)));
         // Precondition holds -> it gets as far as the REST call (no session here).
-        let r = h.restore_to(&p, &h.nodes[1], Expect::Migrate { from: 0, epoch: h.nodes[0].epoch() }).await;
+        let r = h
+            .restore_to(
+                &p,
+                &h.nodes[1],
+                Expect::Migrate {
+                    from: 0,
+                    epoch: h.nodes[0].epoch(),
+                },
+            )
+            .await;
         assert!(matches!(r, Err(Error::NoNode)));
     }
 

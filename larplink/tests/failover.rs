@@ -8,8 +8,24 @@ const LONG: Duration = Duration::from_secs(20);
 
 async fn join_and_play(c: &larplink::LavalinkClient) -> larplink::Player {
     let p = c.player(GuildId(42));
-    c.voice_state_update(GuildId(42), VoiceStateUpdate { channel_id: Some(ChannelId(9)), session_id: "sess".into() }).await.unwrap();
-    c.voice_server_update(GuildId(42), VoiceServerUpdate { token: "tok".into(), endpoint: Some("e:443".into()) }).await.unwrap();
+    c.voice_state_update(
+        GuildId(42),
+        VoiceStateUpdate {
+            channel_id: Some(ChannelId(9)),
+            session_id: "sess".into(),
+        },
+    )
+    .await
+    .unwrap();
+    c.voice_server_update(
+        GuildId(42),
+        VoiceServerUpdate {
+            token: "tok".into(),
+            endpoint: Some("e:443".into()),
+        },
+    )
+    .await
+    .unwrap();
     p.play(&sample_track("ABC")).await.unwrap();
     p
 }
@@ -46,7 +62,10 @@ async fn resumed_true_does_not_resend_state() {
 #[tokio::test]
 async fn players_migrate_to_another_node_after_grace() {
     let (a, b) = (Mock::start().await, Mock::start().await);
-    let c = client_with(&[&a, &b], |cfg| cfg.failover_grace = Duration::from_millis(300)).await;
+    let c = client_with(&[&a, &b], |cfg| {
+        cfg.failover_grace = Duration::from_millis(300)
+    })
+    .await;
     let p = join_and_play(&c).await;
     assert_eq!(p.node_index(), Some(0));
     let mut rx = c.events();
@@ -66,7 +85,10 @@ async fn short_outage_within_grace_does_not_migrate() {
     let (a, b) = (Mock::start().await, Mock::start().await);
     // Grace must exceed the first reconnect delay (<= 500ms backoff) but stay
     // short enough that the failover timer really fires during the test.
-    let c = client_with(&[&a, &b], |cfg| cfg.failover_grace = Duration::from_millis(1000)).await;
+    let c = client_with(&[&a, &b], |cfg| {
+        cfg.failover_grace = Duration::from_millis(1000)
+    })
+    .await;
     let p = join_and_play(&c).await;
     let mut rx = c.events();
     let t0 = tokio::time::Instant::now();
@@ -85,7 +107,10 @@ async fn short_outage_within_grace_does_not_migrate() {
 #[tokio::test]
 async fn timer_of_earlier_outage_does_not_migrate_during_a_new_outage() {
     let (a, b) = (Mock::start().await, Mock::start().await);
-    let c = client_with(&[&a, &b], |cfg| cfg.failover_grace = Duration::from_millis(2000)).await;
+    let c = client_with(&[&a, &b], |cfg| {
+        cfg.failover_grace = Duration::from_millis(2000)
+    })
+    .await;
     let p = join_and_play(&c).await;
     let mut rx = c.events();
     let t0 = tokio::time::Instant::now();
@@ -93,7 +118,7 @@ async fn timer_of_earlier_outage_does_not_migrate_during_a_new_outage() {
     next_event(&mut rx, |e| matches!(e, Event::NodeConnected { .. })).await;
     tokio::time::sleep_until(t0 + Duration::from_millis(1000)).await;
     a.kill(); // outage 2 starts at ~1000ms; its grace ends at ~3000ms
-    // Outage 1's timer fires at ~2000ms with the node down again.
+              // Outage 1's timer fires at ~2000ms with the node down again.
     tokio::time::sleep_until(t0 + Duration::from_millis(2600)).await;
     assert_eq!(p.node_index(), Some(0));
     assert!(b.requests_matching("PATCH", G).is_empty());
@@ -106,7 +131,10 @@ async fn timer_of_earlier_outage_does_not_migrate_during_a_new_outage() {
 async fn orphaned_players_are_rescued_when_the_node_returns() {
     let mock = Mock::start().await;
     let addr = mock.addr.to_string();
-    let c = client_with(&[&mock], |cfg| cfg.failover_grace = Duration::from_millis(200)).await;
+    let c = client_with(&[&mock], |cfg| {
+        cfg.failover_grace = Duration::from_millis(200)
+    })
+    .await;
     let p = join_and_play(&c).await;
     mock.kill();
     eventually(LONG, || !c.nodes()[0].is_ready()).await;
@@ -124,7 +152,10 @@ async fn orphaned_players_are_rescued_when_the_node_returns() {
 async fn migrated_away_player_is_deleted_when_old_node_returns_resumed() {
     let (a, b) = (Mock::start().await, Mock::start().await);
     let a_addr = a.addr.to_string();
-    let c = client_with(&[&a, &b], |cfg| cfg.failover_grace = Duration::from_millis(300)).await;
+    let c = client_with(&[&a, &b], |cfg| {
+        cfg.failover_grace = Duration::from_millis(300)
+    })
+    .await;
     let p = join_and_play(&c).await;
     let mut rx = c.events();
     a.kill();
@@ -138,14 +169,20 @@ async fn migrated_away_player_is_deleted_when_old_node_returns_resumed() {
 async fn orphan_is_rescued_on_exactly_one_of_two_returning_nodes() {
     let (a, b) = (Mock::start().await, Mock::start().await);
     let (a_addr, b_addr) = (a.addr.to_string(), b.addr.to_string());
-    let c = client_with(&[&a, &b], |cfg| cfg.failover_grace = Duration::from_millis(200)).await;
+    let c = client_with(&[&a, &b], |cfg| {
+        cfg.failover_grace = Duration::from_millis(200)
+    })
+    .await;
     let _p = join_and_play(&c).await;
     let mut rx = c.events();
     a.kill();
     b.kill();
     eventually(LONG, || c.nodes().iter().all(|n| !n.is_ready())).await;
     tokio::time::sleep(Duration::from_millis(600)).await; // grace elapsed, orphaned
-    let (a2, b2) = (Mock::start_on(&a_addr, false).await, Mock::start_on(&b_addr, false).await);
+    let (a2, b2) = (
+        Mock::start_on(&a_addr, false).await,
+        Mock::start_on(&b_addr, false).await,
+    );
     eventually(LONG, || {
         !a2.requests_matching("PATCH", G).is_empty() || !b2.requests_matching("PATCH", G).is_empty()
     })
@@ -166,7 +203,10 @@ async fn orphan_is_rescued_on_exactly_one_of_two_returning_nodes() {
 async fn destroyed_player_is_not_resurrected_when_node_returns() {
     let mock = Mock::start().await;
     let addr = mock.addr.to_string();
-    let c = client_with(&[&mock], |cfg| cfg.failover_grace = Duration::from_millis(200)).await;
+    let c = client_with(&[&mock], |cfg| {
+        cfg.failover_grace = Duration::from_millis(200)
+    })
+    .await;
     let p = join_and_play(&c).await;
     let mut rx = c.events();
     mock.kill();

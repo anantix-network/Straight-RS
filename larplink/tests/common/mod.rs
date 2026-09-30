@@ -92,7 +92,12 @@ impl Mock {
         let addr = listener.local_addr().unwrap();
         let (kill, kill_rx) = tokio::sync::watch::channel(false);
         let server = tokio::spawn(accept_loop(listener, app, kill_rx));
-        Mock { addr, state, server, kill }
+        Mock {
+            addr,
+            state,
+            server,
+            kill,
+        }
     }
 
     pub fn host(&self) -> String {
@@ -124,9 +129,15 @@ impl Mock {
     }
 }
 
-async fn accept_loop(listener: tokio::net::TcpListener, app: Router, kill: tokio::sync::watch::Receiver<bool>) {
+async fn accept_loop(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    kill: tokio::sync::watch::Receiver<bool>,
+) {
     loop {
-        let Ok((stream, _)) = listener.accept().await else { continue };
+        let Ok((stream, _)) = listener.accept().await else {
+            continue;
+        };
         let svc = hyper_util::service::TowerToHyperService::new(app.clone());
         let mut kill = kill.clone();
         tokio::spawn(async move {
@@ -148,7 +159,11 @@ impl Drop for InFlight<'_> {
     }
 }
 
-async fn ws_handler(State(s): State<Arc<MockState>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+async fn ws_handler(
+    State(s): State<Arc<MockState>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
     s.ws_headers.lock().unwrap().push(headers);
     s.ws_connections.fetch_add(1, SeqCst);
     ws.on_upgrade(move |socket| ws_session(s, socket))
@@ -156,7 +171,8 @@ async fn ws_handler(State(s): State<Arc<MockState>>, headers: HeaderMap, ws: Web
 
 async fn ws_session(s: Arc<MockState>, mut socket: WebSocket) {
     let mut rx = s.push.subscribe();
-    let ready = json!({"op": "ready", "resumed": s.resumed.load(SeqCst), "sessionId": s.session_id});
+    let ready =
+        json!({"op": "ready", "resumed": s.resumed.load(SeqCst), "sessionId": s.session_id});
     if socket.send(Message::Text(ready.to_string())).await.is_err() {
         return;
     }
@@ -189,14 +205,27 @@ fn merge_player(s: &MockState, gid: &str, body: &Value) -> Value {
             _ => p["track"].clone(),
         };
     }
-    if let Some(v) = body.get("volume") { p["volume"] = v.clone(); }
-    if let Some(v) = body.get("paused") { p["paused"] = v.clone(); }
-    if let Some(v) = body.get("position") { p["state"]["position"] = v.clone(); }
-    if let Some(v) = body.get("filters") { p["filters"] = v.clone(); }
+    if let Some(v) = body.get("volume") {
+        p["volume"] = v.clone();
+    }
+    if let Some(v) = body.get("paused") {
+        p["paused"] = v.clone();
+    }
+    if let Some(v) = body.get("position") {
+        p["state"]["position"] = v.clone();
+    }
+    if let Some(v) = body.get("filters") {
+        p["filters"] = v.clone();
+    }
     p.clone()
 }
 
-async fn rest_handler(State(s): State<Arc<MockState>>, method: Method, uri: Uri, body: Bytes) -> Response {
+async fn rest_handler(
+    State(s): State<Arc<MockState>>,
+    method: Method,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
     let path = uri.path().to_string();
     let body_json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     s.requests.lock().unwrap().push(Recorded {
@@ -258,7 +287,10 @@ async fn rest_handler(State(s): State<Arc<MockState>>, method: Method, uri: Uri,
 pub async fn eventually(timeout: Duration, mut f: impl FnMut() -> bool) {
     let start = std::time::Instant::now();
     while !f() {
-        assert!(start.elapsed() < timeout, "condition not met within {timeout:?}");
+        assert!(
+            start.elapsed() < timeout,
+            "condition not met within {timeout:?}"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
@@ -280,11 +312,17 @@ pub async fn client_with(mocks: &[&Mock], tweak: impl Fn(&mut NodeConfig)) -> La
     }
     let c = b.build().await.unwrap();
     c.wait_ready(Duration::from_secs(5)).await.unwrap();
-    eventually(Duration::from_secs(5), || c.nodes().iter().all(|n| n.is_ready())).await;
+    eventually(Duration::from_secs(5), || {
+        c.nodes().iter().all(|n| n.is_ready())
+    })
+    .await;
     c
 }
 
-pub async fn next_event(rx: &mut broadcast::Receiver<Event>, pred: impl Fn(&Event) -> bool) -> Event {
+pub async fn next_event(
+    rx: &mut broadcast::Receiver<Event>,
+    pred: impl Fn(&Event) -> bool,
+) -> Event {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             match rx.recv().await {

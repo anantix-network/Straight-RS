@@ -39,7 +39,10 @@ fn track_keeps_plugin_info_and_user_data() {
 #[test]
 fn load_result_variants() {
     let track = format!(r#"{{"loadType":"track","data":{TRACK}}}"#);
-    assert!(matches!(serde_json::from_str::<LoadResult>(&track).unwrap(), LoadResult::Track(_)));
+    assert!(matches!(
+        serde_json::from_str::<LoadResult>(&track).unwrap(),
+        LoadResult::Track(_)
+    ));
 
     let search = format!(r#"{{"loadType":"search","data":[{TRACK},{TRACK}]}}"#);
     match serde_json::from_str::<LoadResult>(&search).unwrap() {
@@ -76,17 +79,24 @@ fn load_result_variants() {
 
 #[test]
 fn unknown_severity_does_not_fail() {
-    let e: Exception = serde_json::from_str(r#"{"message":null,"severity":"weird","cause":""}"#).unwrap();
+    let e: Exception =
+        serde_json::from_str(r#"{"message":null,"severity":"weird","cause":""}"#).unwrap();
     assert_eq!(e.severity, Severity::Unknown);
 }
 
 #[test]
 fn update_player_serializes_only_set_fields() {
-    let u = UpdatePlayer { volume: Some(50), ..Default::default() };
+    let u = UpdatePlayer {
+        volume: Some(50),
+        ..Default::default()
+    };
     assert_eq!(serde_json::to_value(&u).unwrap(), json!({"volume": 50}));
 
     let stop = UpdatePlayer {
-        track: Some(UpdateTrack { encoded: Some(None), ..Default::default() }),
+        track: Some(UpdateTrack {
+            encoded: Some(None),
+            ..Default::default()
+        }),
         end_time: Some(None),
         ..Default::default()
     };
@@ -126,14 +136,22 @@ fn filters_all_variants_roundtrip() {
 
 #[test]
 fn stats_with_and_without_frame_stats() {
-    let base = |fs: &str| format!(r#"{{"players":1,"playingPlayers":1,"uptime":5,"memory":{{"free":1,"used":2,"allocated":3,"reservable":4}},"cpu":{{"cores":4,"systemLoad":0.5,"lavalinkLoad":0.1}},"frameStats":{fs}}}"#);
-    let s: Stats = serde_json::from_str(&base(r#"{"sent":6000,"nulled":10,"deficit":-3}"#)).unwrap();
+    let base = |fs: &str| {
+        format!(
+            r#"{{"players":1,"playingPlayers":1,"uptime":5,"memory":{{"free":1,"used":2,"allocated":3,"reservable":4}},"cpu":{{"cores":4,"systemLoad":0.5,"lavalinkLoad":0.1}},"frameStats":{fs}}}"#
+        )
+    };
+    let s: Stats =
+        serde_json::from_str(&base(r#"{"sent":6000,"nulled":10,"deficit":-3}"#)).unwrap();
     assert_eq!(s.frame_stats.unwrap().deficit, -3);
     let s: Stats = serde_json::from_str(&base("null")).unwrap();
     assert!(s.frame_stats.is_none());
     let mut v: Value = serde_json::from_str(&base("null")).unwrap();
     v.as_object_mut().unwrap().remove("frameStats");
-    assert!(serde_json::from_value::<Stats>(v).unwrap().frame_stats.is_none());
+    assert!(serde_json::from_value::<Stats>(v)
+        .unwrap()
+        .frame_stats
+        .is_none());
 }
 
 #[test]
@@ -144,7 +162,8 @@ fn info_and_routeplanner_parse() {
     let i: Info = serde_json::from_value(info).unwrap();
     assert_eq!(i.version.major, 4);
     assert_eq!(i.plugins[0].name, "p");
-    let rp: RoutePlannerStatus = serde_json::from_value(json!({"class":null,"details":null})).unwrap();
+    let rp: RoutePlannerStatus =
+        serde_json::from_value(json!({"class":null,"details":null})).unwrap();
     assert!(rp.class.is_none());
     let rp: RoutePlannerStatus = serde_json::from_value(json!({"class":"RotatingIpRoutePlanner","details":{
       "ipBlock":{"type":"Inet6Address","size":"1"},"failingAddresses":[{"failingAddress":"a","failingTimestamp":1,"failingTime":"t"}],
@@ -164,9 +183,13 @@ fn ws_known_messages() {
         WsMessage::PlayerUpdate(u) => assert_eq!(u.guild_id.0, u64::MAX),
         o => panic!("{o:?}"),
     }
-    let end = format!(r#"{{"op":"event","type":"TrackEndEvent","guildId":"1","track":{EV_TRACK},"reason":"loadFailed"}}"#);
+    let end = format!(
+        r#"{{"op":"event","type":"TrackEndEvent","guildId":"1","track":{EV_TRACK},"reason":"loadFailed"}}"#
+    );
     match WsMessage::parse(&end).unwrap() {
-        WsMessage::Event(Event::TrackEnd { guild_id, reason, .. }) => {
+        WsMessage::Event(Event::TrackEnd {
+            guild_id, reason, ..
+        }) => {
             assert_eq!(guild_id, GuildId(1));
             assert_eq!(reason, TrackEndReason::LoadFailed);
             assert!(reason.may_start_next());
@@ -174,20 +197,47 @@ fn ws_known_messages() {
         }
         o => panic!("{o:?}"),
     }
-    let exc = format!(r#"{{"op":"event","type":"TrackExceptionEvent","guildId":"1","track":{EV_TRACK},"exception":{{"message":"boom","severity":"fault","cause":"x"}}}}"#);
-    assert!(matches!(WsMessage::parse(&exc).unwrap(), WsMessage::Event(Event::TrackException { .. })));
-    let stuck = format!(r#"{{"op":"event","type":"TrackStuckEvent","guildId":"1","track":{EV_TRACK},"thresholdMs":10000}}"#);
-    assert!(matches!(WsMessage::parse(&stuck).unwrap(), WsMessage::Event(Event::TrackStuck { threshold_ms: 10000, .. })));
+    let exc = format!(
+        r#"{{"op":"event","type":"TrackExceptionEvent","guildId":"1","track":{EV_TRACK},"exception":{{"message":"boom","severity":"fault","cause":"x"}}}}"#
+    );
+    assert!(matches!(
+        WsMessage::parse(&exc).unwrap(),
+        WsMessage::Event(Event::TrackException { .. })
+    ));
+    let stuck = format!(
+        r#"{{"op":"event","type":"TrackStuckEvent","guildId":"1","track":{EV_TRACK},"thresholdMs":10000}}"#
+    );
+    assert!(matches!(
+        WsMessage::parse(&stuck).unwrap(),
+        WsMessage::Event(Event::TrackStuck {
+            threshold_ms: 10000,
+            ..
+        })
+    ));
     let closed = r#"{"op":"event","type":"WebSocketClosedEvent","guildId":"1","code":4006,"reason":"x","byRemote":true}"#;
-    assert!(matches!(WsMessage::parse(closed).unwrap(), WsMessage::Event(Event::WebSocketClosed { code: 4006, by_remote: true, .. })));
-    let start = format!(r#"{{"op":"event","type":"TrackStartEvent","guildId":"1","track":{EV_TRACK}}}"#);
-    assert!(matches!(WsMessage::parse(&start).unwrap(), WsMessage::Event(Event::TrackStart { .. })));
+    assert!(matches!(
+        WsMessage::parse(closed).unwrap(),
+        WsMessage::Event(Event::WebSocketClosed {
+            code: 4006,
+            by_remote: true,
+            ..
+        })
+    ));
+    let start =
+        format!(r#"{{"op":"event","type":"TrackStartEvent","guildId":"1","track":{EV_TRACK}}}"#);
+    assert!(matches!(
+        WsMessage::parse(&start).unwrap(),
+        WsMessage::Event(Event::TrackStart { .. })
+    ));
 }
 
 #[test]
 fn ws_unknown_and_malformed_never_error_unless_not_json() {
     match WsMessage::parse(r#"{"op":"weird","x":1}"#).unwrap() {
-        WsMessage::Unknown { op, payload } => { assert_eq!(op, "weird"); assert_eq!(payload["x"], 1); }
+        WsMessage::Unknown { op, payload } => {
+            assert_eq!(op, "weird");
+            assert_eq!(payload["x"], 1);
+        }
         o => panic!("{o:?}"),
     }
     match WsMessage::parse(r#"{"op":"event","type":"NewEvent","guildId":"1"}"#).unwrap() {
@@ -195,8 +245,14 @@ fn ws_unknown_and_malformed_never_error_unless_not_json() {
         o => panic!("{o:?}"),
     }
     // known op, malformed body -> Unknown, not an error
-    assert!(matches!(WsMessage::parse(r#"{"op":"playerUpdate"}"#).unwrap(), WsMessage::Unknown { .. }));
-    assert!(matches!(WsMessage::parse("[1,2]").unwrap(), WsMessage::Unknown { .. }));
+    assert!(matches!(
+        WsMessage::parse(r#"{"op":"playerUpdate"}"#).unwrap(),
+        WsMessage::Unknown { .. }
+    ));
+    assert!(matches!(
+        WsMessage::parse("[1,2]").unwrap(),
+        WsMessage::Unknown { .. }
+    ));
     assert!(WsMessage::parse("not json").is_err());
 }
 
@@ -204,6 +260,7 @@ fn ws_unknown_and_malformed_never_error_unless_not_json() {
 fn rest_error_body() {
     let e: RestError = serde_json::from_str(r#"{"timestamp":1,"status":404,"error":"Not Found","message":"Session not found","path":"/v4/x"}"#).unwrap();
     assert_eq!(e.status, 404);
-    let e: RestError = serde_json::from_str(r#"{"status":400,"error":"Bad Request","path":"/v4/x"}"#).unwrap();
+    let e: RestError =
+        serde_json::from_str(r#"{"status":400,"error":"Bad Request","path":"/v4/x"}"#).unwrap();
     assert_eq!(e.message, "");
 }

@@ -8,7 +8,10 @@ use std::time::Duration;
 const G: &str = "/v4/sessions/mock-session/players/42";
 
 fn track_end(enc: &str, reason: &str) -> String {
-    format!(r#"{{"op":"event","type":"TrackEndEvent","guildId":"42","track":{},"reason":"{reason}"}}"#, track_json(enc))
+    format!(
+        r#"{{"op":"event","type":"TrackEndEvent","guildId":"42","track":{},"reason":"{reason}"}}"#,
+        track_json(enc)
+    )
 }
 
 #[tokio::test]
@@ -37,12 +40,19 @@ async fn stop_pause_seek_volume_filters() {
     assert_eq!(p.snapshot().position, 5_000);
     p.set_volume(5_000).await.unwrap();
     assert_eq!(p.volume(), 1000);
-    let f = Filters { volume: Some(0.5), ..Default::default() };
+    let f = Filters {
+        volume: Some(0.5),
+        ..Default::default()
+    };
     p.set_filters(f.clone()).await.unwrap();
     assert_eq!(p.snapshot().filters, f);
     p.stop().await.unwrap();
     assert!(p.track().is_none());
-    let bodies: Vec<_> = mock.requests_matching("PATCH", G).into_iter().map(|r| r.body).collect();
+    let bodies: Vec<_> = mock
+        .requests_matching("PATCH", G)
+        .into_iter()
+        .map(|r| r.body)
+        .collect();
     assert_eq!(bodies[1], json!({"paused": true}));
     assert_eq!(bodies[2], json!({"position": 5000}));
     assert_eq!(bodies[3], json!({"volume": 1000}));
@@ -81,7 +91,11 @@ async fn writes_for_one_guild_never_overlap_and_keep_call_order() {
     t1.await.unwrap();
     t2.await.unwrap();
     assert_eq!(mock.state.max_in_flight.load(SeqCst), 1);
-    let vols: Vec<_> = mock.requests_matching("PATCH", G).iter().map(|r| r.body["volume"].as_u64().unwrap()).collect();
+    let vols: Vec<_> = mock
+        .requests_matching("PATCH", G)
+        .iter()
+        .map(|r| r.body["volume"].as_u64().unwrap())
+        .collect();
     assert_eq!(vols, vec![1, 10, 20]);
     assert_eq!(p.volume(), 20);
 }
@@ -111,11 +125,20 @@ async fn player_events_only_yield_own_guild() {
     let c = client(&[&mock]).await;
     let p = c.player(GuildId(42));
     let mut ev = p.events();
-    let other = format!(r#"{{"op":"event","type":"TrackStartEvent","guildId":"43","track":{}}}"#, track_json("X"));
-    let mine = format!(r#"{{"op":"event","type":"TrackStartEvent","guildId":"42","track":{}}}"#, track_json("Y"));
+    let other = format!(
+        r#"{{"op":"event","type":"TrackStartEvent","guildId":"43","track":{}}}"#,
+        track_json("X")
+    );
+    let mine = format!(
+        r#"{{"op":"event","type":"TrackStartEvent","guildId":"42","track":{}}}"#,
+        track_json("Y")
+    );
     mock.push_text(other);
     mock.push_text(mine);
-    let e = tokio::time::timeout(Duration::from_secs(5), ev.recv()).await.unwrap().unwrap();
+    let e = tokio::time::timeout(Duration::from_secs(5), ev.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(e.guild(), Some(GuildId(42)));
 }
 
@@ -136,7 +159,11 @@ async fn writes_fail_with_no_node_when_pool_is_down() {
     let c = client(&[&mock]).await;
     mock.kill();
     eventually(Duration::from_secs(5), || !c.nodes()[0].is_ready()).await;
-    let e = c.player(GuildId(1)).play(&sample_track("A")).await.unwrap_err();
+    let e = c
+        .player(GuildId(1))
+        .play(&sample_track("A"))
+        .await
+        .unwrap_err();
     assert!(matches!(e, Error::NoNode));
 }
 
@@ -144,7 +171,11 @@ async fn writes_fail_with_no_node_when_pool_is_down() {
 async fn join_without_gateway_is_a_config_error() {
     let mock = Mock::start().await;
     let c = client(&[&mock]).await;
-    let e = c.player(GuildId(1)).join(larplink::ChannelId(2)).await.unwrap_err();
+    let e = c
+        .player(GuildId(1))
+        .join(larplink::ChannelId(2))
+        .await
+        .unwrap_err();
     assert!(matches!(e, Error::Config(_)));
 }
 

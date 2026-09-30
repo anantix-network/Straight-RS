@@ -6,8 +6,8 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use larplink_model::{
-    GuildId, Info, LoadResult, Player, RestError, RoutePlannerStatus, Session, SessionUpdate, Stats,
-    Track, UpdatePlayer,
+    GuildId, Info, LoadResult, Player, RestError, RoutePlannerStatus, Session, SessionUpdate,
+    Stats, Track, UpdatePlayer,
 };
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::de::DeserializeOwned;
@@ -21,7 +21,11 @@ type Conn = HttpConnector;
 const RETRIES: u32 = 2;
 
 /// NON_ALPHANUMERIC minus the RFC 3986 unreserved marks, so ids like `mock-session` stay readable.
-const ENC: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'_').remove(b'.').remove(b'~');
+const ENC: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
 
 #[derive(Clone)]
 pub struct RestClient {
@@ -54,21 +58,32 @@ impl RestClient {
         let conn = http;
         Self {
             client: Client::builder(TokioExecutor::new()).build(conn),
-            origin: format!("{}://{}", if cfg.secure { "https" } else { "http" }, cfg.host),
+            origin: format!(
+                "{}://{}",
+                if cfg.secure { "https" } else { "http" },
+                cfg.host
+            ),
             password: cfg.password.clone(),
             user_agent: client_name.to_owned(),
             timeout: cfg.request_timeout,
         }
     }
 
-    async fn send(&self, method: Method, path: &str, body: Option<Vec<u8>>) -> Result<(StatusCode, Bytes)> {
+    async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Vec<u8>>,
+    ) -> Result<(StatusCode, Bytes)> {
         let b = Request::builder()
             .method(method)
             .uri(format!("{}{}", self.origin, path))
             .header("Authorization", &self.password)
             .header("User-Agent", &self.user_agent);
         let req = match body {
-            Some(v) => b.header("Content-Type", "application/json").body(Full::new(Bytes::from(v))),
+            Some(v) => b
+                .header("Content-Type", "application/json")
+                .body(Full::new(Bytes::from(v))),
             None => b.body(Full::new(Bytes::new())),
         }
         .map_err(|e| Error::Config(e.to_string()))?;
@@ -78,7 +93,9 @@ impl RestClient {
             let bytes = resp.into_body().collect().await?.to_bytes();
             Ok::<_, Error>((status, bytes))
         };
-        tokio::time::timeout(self.timeout, fut).await.map_err(|_| Error::Timeout)?
+        tokio::time::timeout(self.timeout, fut)
+            .await
+            .map_err(|_| Error::Timeout)?
     }
 
     fn check(status: StatusCode, path: &str, body: &[u8]) -> Result<()> {
@@ -87,7 +104,11 @@ impl RestClient {
         }
         Err(match serde_json::from_slice::<RestError>(body) {
             Ok(e) => Error::Lavalink {
-                status: if e.status == 0 { status.as_u16() } else { e.status },
+                status: if e.status == 0 {
+                    status.as_u16()
+                } else {
+                    e.status
+                },
                 error: e.error,
                 message: e.message,
                 path: e.path,
@@ -133,21 +154,26 @@ impl RestClient {
     }
 
     pub async fn load_tracks(&self, identifier: &str) -> Result<LoadResult> {
-        self.get_json(&format!("/v4/loadtracks?identifier={}", enc(identifier))).await
+        self.get_json(&format!("/v4/loadtracks?identifier={}", enc(identifier)))
+            .await
     }
 
     pub async fn decode_track(&self, encoded: &str) -> Result<Track> {
-        self.get_json(&format!("/v4/decodetrack?encodedTrack={}", enc(encoded))).await
+        self.get_json(&format!("/v4/decodetrack?encodedTrack={}", enc(encoded)))
+            .await
     }
 
     pub async fn decode_tracks(&self, encoded: &[String]) -> Result<Vec<Track>> {
         let body = serde_json::to_vec(encoded)?;
-        let out = self.write(Method::POST, "/v4/decodetracks", Some(body)).await?;
+        let out = self
+            .write(Method::POST, "/v4/decodetracks", Some(body))
+            .await?;
         Ok(serde_json::from_slice(&out)?)
     }
 
     pub async fn get_players(&self, session: &str) -> Result<Vec<Player>> {
-        self.get_json(&format!("/v4/sessions/{}/players", enc(session))).await
+        self.get_json(&format!("/v4/sessions/{}/players", enc(session)))
+            .await
     }
 
     pub async fn update_player(
@@ -157,8 +183,15 @@ impl RestClient {
         upd: &UpdatePlayer,
         no_replace: bool,
     ) -> Result<Player> {
-        let path = format!("/v4/sessions/{}/players/{}?noReplace={}", enc(session), guild, no_replace);
-        let out = self.write(Method::PATCH, &path, Some(serde_json::to_vec(upd)?)).await?;
+        let path = format!(
+            "/v4/sessions/{}/players/{}?noReplace={}",
+            enc(session),
+            guild,
+            no_replace
+        );
+        let out = self
+            .write(Method::PATCH, &path, Some(serde_json::to_vec(upd)?))
+            .await?;
         Ok(serde_json::from_slice(&out)?)
     }
 
@@ -169,7 +202,9 @@ impl RestClient {
 
     pub async fn update_session(&self, session: &str, upd: &SessionUpdate) -> Result<Session> {
         let path = format!("/v4/sessions/{}", enc(session));
-        let out = self.write(Method::PATCH, &path, Some(serde_json::to_vec(upd)?)).await?;
+        let out = self
+            .write(Method::PATCH, &path, Some(serde_json::to_vec(upd)?))
+            .await?;
         Ok(serde_json::from_slice(&out)?)
     }
 
@@ -178,7 +213,9 @@ impl RestClient {
     }
 
     pub async fn version(&self) -> Result<String> {
-        Ok(String::from_utf8_lossy(&self.get("/version").await?).trim().to_owned())
+        Ok(String::from_utf8_lossy(&self.get("/version").await?)
+            .trim()
+            .to_owned())
     }
 
     pub async fn stats(&self) -> Result<Stats> {
@@ -195,10 +232,14 @@ impl RestClient {
 
     pub async fn free_address(&self, address: &str) -> Result<()> {
         let body = serde_json::to_vec(&serde_json::json!({ "address": address }))?;
-        self.write(Method::POST, "/v4/routeplanner/free/address", Some(body)).await.map(|_| ())
+        self.write(Method::POST, "/v4/routeplanner/free/address", Some(body))
+            .await
+            .map(|_| ())
     }
 
     pub async fn free_all(&self) -> Result<()> {
-        self.write(Method::POST, "/v4/routeplanner/free/all", None).await.map(|_| ())
+        self.write(Method::POST, "/v4/routeplanner/free/all", None)
+            .await
+            .map(|_| ())
     }
 }

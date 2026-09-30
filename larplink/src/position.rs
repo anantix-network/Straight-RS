@@ -19,15 +19,33 @@ pub fn interpolate(position: u64, playing: bool, elapsed: Duration, length: Opti
 mod tests {
     use super::*;
     use std::time::Duration;
-    #[test] fn adds_elapsed_only_while_playing() {
-        assert_eq!(interpolate(1000, true, Duration::from_millis(250), Some(10_000)), 1250);
-        assert_eq!(interpolate(1000, false, Duration::from_millis(250), Some(10_000)), 1000);
+    #[test]
+    fn adds_elapsed_only_while_playing() {
+        assert_eq!(
+            interpolate(1000, true, Duration::from_millis(250), Some(10_000)),
+            1250
+        );
+        assert_eq!(
+            interpolate(1000, false, Duration::from_millis(250), Some(10_000)),
+            1000
+        );
     }
-    #[test] fn clamps_to_track_length_but_not_for_streams() {
-        assert_eq!(interpolate(9_900, true, Duration::from_secs(5), Some(10_000)), 10_000);
-        assert_eq!(interpolate(9_900, true, Duration::from_secs(5), None), 14_900);
+    #[test]
+    fn clamps_to_track_length_but_not_for_streams() {
+        assert_eq!(
+            interpolate(9_900, true, Duration::from_secs(5), Some(10_000)),
+            10_000
+        );
+        assert_eq!(
+            interpolate(9_900, true, Duration::from_secs(5), None),
+            14_900
+        );
     }
-    #[test] fn saturates() {
-        assert_eq!(interpolate(u64::MAX, true, Duration::from_secs(5), None), u64::MAX);
+    #[test]
+    fn saturates() {
+        assert_eq!(
+            interpolate(u64::MAX, true, Duration::from_secs(5), None),
+            u64::MAX
+        );
     }
 }

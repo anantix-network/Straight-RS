@@ -58,7 +58,9 @@ impl Node {
         })
     }
 
-    pub fn index(&self) -> usize { self.index }
+    pub fn index(&self) -> usize {
+        self.index
+    }
     pub fn status(&self) -> NodeStatus {
         match self.status.load(Acquire) {
             0 => NodeStatus::Connecting,
@@ -68,24 +70,47 @@ impl Node {
     }
     fn set_status(&self, s: NodeStatus) {
         self.status.store(
-            match s { NodeStatus::Connecting => 0, NodeStatus::Ready => 1, NodeStatus::Disconnected => 2 },
+            match s {
+                NodeStatus::Connecting => 0,
+                NodeStatus::Ready => 1,
+                NodeStatus::Disconnected => 2,
+            },
             Release,
         );
     }
-    pub fn is_ready(&self) -> bool { self.status() == NodeStatus::Ready }
-    pub fn penalty(&self) -> u32 { self.penalty.load(Relaxed) }
-    pub fn players(&self) -> u32 { self.players.load(Relaxed) }
-    pub fn stats(&self) -> Option<Arc<Stats>> { self.stats.load_full() }
-    pub fn session_id(&self) -> Option<Arc<String>> { self.session_id.load_full() }
-    pub fn rest(&self) -> &RestClient { &self.rest }
-    pub(crate) fn bump_epoch(&self) -> u64 { self.epoch.fetch_add(1, AcqRel) + 1 }
-    pub(crate) fn epoch(&self) -> u64 { self.epoch.load(Acquire) }
+    pub fn is_ready(&self) -> bool {
+        self.status() == NodeStatus::Ready
+    }
+    pub fn penalty(&self) -> u32 {
+        self.penalty.load(Relaxed)
+    }
+    pub fn players(&self) -> u32 {
+        self.players.load(Relaxed)
+    }
+    pub fn stats(&self) -> Option<Arc<Stats>> {
+        self.stats.load_full()
+    }
+    pub fn session_id(&self) -> Option<Arc<String>> {
+        self.session_id.load_full()
+    }
+    pub fn rest(&self) -> &RestClient {
+        &self.rest
+    }
+    pub(crate) fn bump_epoch(&self) -> u64 {
+        self.epoch.fetch_add(1, AcqRel) + 1
+    }
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch.load(Acquire)
+    }
 
     pub async fn info(&self) -> Result<&Info> {
         self.info.get_or_try_init(|| self.rest.info()).await
     }
     pub async fn version(&self) -> Result<&str> {
-        self.version.get_or_try_init(|| self.rest.version()).await.map(String::as_str)
+        self.version
+            .get_or_try_init(|| self.rest.version())
+            .await
+            .map(String::as_str)
     }
     pub async fn route_planner_status(&self) -> Result<RoutePlannerStatus> {
         self.rest.route_planner_status().await
@@ -140,7 +165,10 @@ impl Node {
             .await
             .map_err(|_| Error::Timeout)??;
         let (mut write, mut read) = ws.split();
-        let mut ping = tokio::time::interval_at(Instant::now() + self.cfg.ping_interval, self.cfg.ping_interval);
+        let mut ping = tokio::time::interval_at(
+            Instant::now() + self.cfg.ping_interval,
+            self.cfg.ping_interval,
+        );
         ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_rx = Instant::now();
         loop {
@@ -172,7 +200,11 @@ impl Node {
                 self.set_status(NodeStatus::Ready);
                 backoff.reset();
                 self.enable_resume(r.session_id.clone());
-                hub.emit(Event::Ready { node: self.index, resumed: r.resumed, session_id: r.session_id.into() });
+                hub.emit(Event::Ready {
+                    node: self.index,
+                    resumed: r.resumed,
+                    session_id: r.session_id.into(),
+                });
                 hub.node_ready(self, r.resumed);
             }
             Ok(WsMessage::Stats(s)) => {
@@ -180,7 +212,10 @@ impl Node {
                 self.players.store(s.players, Relaxed);
                 let s = Arc::new(s);
                 self.stats.store(Some(s.clone()));
-                hub.emit(Event::Stats { node: self.index, stats: s });
+                hub.emit(Event::Stats {
+                    node: self.index,
+                    stats: s,
+                });
             }
             Ok(msg) => hub.on_message(self, msg),
             Err(e) => tracing::warn!(node = self.index, error = %e, "ignoring unparseable frame"),
@@ -190,7 +225,10 @@ impl Node {
     fn enable_resume(self: &Arc<Self>, session: String) {
         let node = self.clone();
         tokio::spawn(async move {
-            let upd = SessionUpdate { resuming: Some(true), timeout: Some(node.cfg.resume_timeout_secs) };
+            let upd = SessionUpdate {
+                resuming: Some(true),
+                timeout: Some(node.cfg.resume_timeout_secs),
+            };
             if let Err(e) = node.rest.update_session(&session, &upd).await {
                 tracing::warn!(node = node.index, error = %e, "failed to enable session resuming");
             }
