@@ -76,14 +76,14 @@ impl VoiceGateway for GatewayVoiceProxy {
         Box::pin(async move {
             self.set_voice(guild, Some(channel))
                 .await
-                .map_err(|e| straight_rs::Error::Config(e.to_string()))
+                .map_err(|e| straight_rs::Error::Gateway(Box::new(e)))
         })
     }
     fn leave(&self, guild: GuildId) -> straight_rs::BoxFuture<'_, straight_rs::Result<()>> {
         Box::pin(async move {
             self.set_voice(guild, None)
                 .await
-                .map_err(|e| straight_rs::Error::Config(e.to_string()))
+                .map_err(|e| straight_rs::Error::Gateway(Box::new(e)))
         })
     }
 }

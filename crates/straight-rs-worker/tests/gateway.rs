@@ -1,3 +1,6 @@
+#[path = "common/fake_gateway.rs"]
+mod fake_gateway;
+
 use std::time::Duration;
 use straight_rs::{ChannelId, GuildId, VoiceGateway};
 use straight_rs_worker::{GatewayCommand, GatewayEvent, GatewayVoiceProxy, WorkerError};
@@ -42,6 +45,75 @@ async fn closed_driver_channel_returns_error() {
     drop(rx);
     let proxy = GatewayVoiceProxy::new(tx, Duration::from_secs(1));
     assert!(proxy.join(GuildId(1), ChannelId(2)).await.is_err());
+}
+
+#[tokio::test]
+async fn gateway_run_relays_voice_state_event_to_receiver() {
+    use straight_rs_worker::{GatewayDriver, SecretString};
+
+    let (commands_tx, commands_rx) = mpsc::channel(1);
+    let (events_tx, mut events_rx) = mpsc::channel(1);
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let driver = fake_gateway::FakeGateway;
+    let driver_task = tokio::spawn(async move {
+        driver
+            .run(
+                SecretString::new("token"),
+                straight_rs::UserId(9),
+                commands_rx,
+                events_tx,
+                shutdown_rx,
+            )
+            .await
+    });
+    let event = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
+        .await
+        .expect("voice-state event deadline elapsed")
+        .expect("driver closed event channel");
+    assert!(matches!(event, GatewayEvent::Ready));
+    let (reply, reply_rx) = tokio::sync::oneshot::channel();
+    commands_tx
+        .send(GatewayCommand::SetVoiceState {
+            guild: GuildId(4),
+            channel: Some(ChannelId(5)),
+            reply,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), reply_rx)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
+        .await
+        .expect("voice-state event deadline elapsed")
+        .expect("driver closed event channel");
+    assert!(
+        matches!(event, GatewayEvent::VoiceState { guild: GuildId(4), update } if update.channel_id == Some(ChannelId(5)))
+    );
+    drop(commands_tx);
+    driver_task.abort();
+}
+
+#[tokio::test]
+async fn closed_driver_channel_returns_gateway_error_variant() {
+    let (tx, rx) = mpsc::channel(1);
+    drop(rx);
+    let proxy = GatewayVoiceProxy::new(tx, Duration::from_secs(1));
+    let error = proxy.join(GuildId(1), ChannelId(2)).await.unwrap_err();
+    assert!(matches!(error, straight_rs::Error::Gateway(_)));
+}
+
+#[tokio::test]
+async fn gateway_timeout_returns_gateway_error_variant() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let proxy = GatewayVoiceProxy::new(tx, Duration::from_millis(1));
+    let task = tokio::spawn(async move { proxy.join(GuildId(1), ChannelId(2)).await });
+    let command = rx.recv().await.unwrap();
+    let error = task.await.unwrap().unwrap_err();
+    assert!(matches!(error, straight_rs::Error::Gateway(_)));
+    drop(command);
 }
 
 #[test]

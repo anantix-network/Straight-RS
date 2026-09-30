@@ -1,9 +1,5 @@
 use crate::error::{WorkerError, WorkerResult};
-use std::{
-    fmt,
-    net::{IpAddr, SocketAddr},
-    time::Duration,
-};
+use std::{fmt, net::SocketAddr, time::Duration};
 use straight_rs::NodeConfig;
 use straight_rs_model::UserId;
 
@@ -110,7 +106,6 @@ impl WorkerConfig {
                 "limits and timeouts must be non-zero".into(),
             ));
         }
-        let _ = IpAddr::from(self.bind_addr.ip());
         Ok(())
     }
 }
@@ -133,6 +128,83 @@ impl fmt::Debug for SecretString {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_builder() -> WorkerBuilder {
+        WorkerBuilder::new(
+            UserId(1),
+            SecretString::new("bot-token"),
+            SecretString::new("api-token"),
+            vec![NodeConfig::new("localhost:2333", "password")],
+        )
+    }
+
+    #[test]
+    fn rejects_empty_bot_token() {
+        let builder = WorkerBuilder::new(
+            UserId(1),
+            SecretString::new(""),
+            SecretString::new("api-token"),
+            vec![NodeConfig::new("localhost:2333", "password")],
+        );
+        assert!(matches!(builder.build(), Err(WorkerError::Config(_))));
+    }
+
+    #[test]
+    fn rejects_empty_api_token() {
+        let builder = WorkerBuilder::new(
+            UserId(1),
+            SecretString::new("bot-token"),
+            SecretString::new(""),
+            vec![NodeConfig::new("localhost:2333", "password")],
+        );
+        assert!(matches!(builder.build(), Err(WorkerError::Config(_))));
+    }
+
+    #[test]
+    fn rejects_empty_nodes() {
+        let builder = WorkerBuilder::new(
+            UserId(1),
+            SecretString::new("bot-token"),
+            SecretString::new("api-token"),
+            vec![],
+        );
+        assert!(matches!(builder.build(), Err(WorkerError::Config(_))));
+    }
+
+    #[test]
+    fn rejects_remote_bind_without_opt_in() {
+        let builder = valid_builder().bind_addr("0.0.0.0:8080".parse().unwrap(), false);
+        assert!(matches!(builder.build(), Err(WorkerError::Config(_))));
+    }
+
+    #[test]
+    fn rejects_zero_limiter_capacity() {
+        let mut config = valid_builder().build().unwrap();
+        config.limiter_table_capacity = 0;
+        assert!(matches!(config.validate(), Err(WorkerError::Config(_))));
+    }
+
+    #[test]
+    fn rejects_zero_limits_and_timeouts() {
+        let mut config = valid_builder().build().unwrap();
+        config.body_limit = 0;
+        assert!(matches!(config.validate(), Err(WorkerError::Config(_))));
+        config.body_limit = 1;
+        config.callback_timeout = Duration::ZERO;
+        assert!(matches!(config.validate(), Err(WorkerError::Config(_))));
+        config.callback_timeout = Duration::from_secs(1);
+        config.shutdown_timeout = Duration::ZERO;
+        assert!(matches!(config.validate(), Err(WorkerError::Config(_))));
+        config.shutdown_timeout = Duration::from_secs(1);
+        config.gateway_command_timeout = Duration::ZERO;
+        assert!(matches!(config.validate(), Err(WorkerError::Config(_))));
+        config.gateway_command_timeout = Duration::from_secs(1);
+        config.plugin_event_capacity = 0;
+        assert!(matches!(config.validate(), Err(WorkerError::Config(_))));
+        config.plugin_event_capacity = 1;
+        config.per_ip_request_limit = 0;
+        assert!(matches!(config.validate(), Err(WorkerError::Config(_))));
+    }
 
     #[test]
     fn secret_debug_is_redacted() {

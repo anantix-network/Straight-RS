@@ -1,5 +1,6 @@
 use crate::{
     config::SecretString,
+    error::WorkerError,
     gateway::{GatewayCommand, GatewayDriver, GatewayEvent, GatewayFuture},
 };
 use straight_rs_model::UserId;
@@ -25,6 +26,10 @@ impl GatewayDriver for SerenityGatewayDriver {
         _events: mpsc::Sender<GatewayEvent>,
         _shutdown: watch::Receiver<bool>,
     ) -> GatewayFuture<'a> {
-        Box::pin(async { Ok(()) })
+        Box::pin(async {
+            Err(WorkerError::Gateway(
+                "Serenity adapter is not implemented".into(),
+            ))
+        })
     }
 }
