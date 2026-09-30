@@ -47,8 +47,7 @@ pub struct TrackView {
     source_name: String,
 }
 impl PlayerView {
-    fn make(g: GuildId, s: &WorkerApiState) -> Self {
-        let p = s.client.player(g);
+    fn make(g: GuildId, s: &WorkerApiState, p: straight_rs::Player) -> Self {
         let snap = p.snapshot();
         let track = snap.track.as_ref().map(|t| TrackView {
             identifier: t.info.identifier.clone(),
@@ -148,7 +147,10 @@ async fn get_player(
     let Some(g) = parse::<u64>(&id).map(GuildId) else {
         return invalid();
     };
-    Json(PlayerView::make(g, &s)).into_response()
+    match s.client.get_player(g) {
+        Some(p) => Json(PlayerView::make(g, &s, p)).into_response(),
+        None => err(StatusCode::NOT_FOUND, "not_found", "Player not found."),
+    }
 }
 async fn act(
     s: Arc<WorkerApiState>,
@@ -221,21 +223,9 @@ async fn play(
                 "not_found",
                 "No playable track was found.",
             )),
-            Ok(LoadResult::Track(t)) => c.player(g).play(&t).await.map_err(|_| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    "playback_failed",
-                    "Playback request failed.",
-                )
-            }),
+            Ok(LoadResult::Track(t)) => c.player(g).play(&t).await.map_err(play_error),
             Ok(LoadResult::Search(ts)) => match ts.first() {
-                Some(t) => c.player(g).play(t).await.map_err(|_| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        "playback_failed",
-                        "Playback request failed.",
-                    )
-                }),
+                Some(t) => c.player(g).play(t).await.map_err(play_error),
                 None => Err((
                     StatusCode::NOT_FOUND,
                     "not_found",
@@ -248,13 +238,7 @@ async fn play(
                     .filter(|i| *i < p.tracks.len())
                     .unwrap_or(0);
                 match p.tracks.get(idx) {
-                    Some(t) => c.player(g).play(t).await.map_err(|_| {
-                        (
-                            StatusCode::BAD_GATEWAY,
-                            "playback_failed",
-                            "Playback request failed.",
-                        )
-                    }),
+                    Some(t) => c.player(g).play(t).await.map_err(play_error),
                     None => Err((
                         StatusCode::NOT_FOUND,
                         "not_found",
@@ -343,6 +327,21 @@ async fn leave(
     };
     let p = s.client.player(g);
     act(s.clone(), async move { p.leave().await }).await
+}
+fn play_error(error: straight_rs::Error) -> (StatusCode, &'static str, &'static str) {
+    if matches!(error, straight_rs::Error::NoNode) {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "Playback service is unavailable.",
+        )
+    } else {
+        (
+            StatusCode::BAD_GATEWAY,
+            "playback_failed",
+            "Playback request failed.",
+        )
+    }
 }
 pub fn router(state: Arc<WorkerApiState>, auth_state: AuthState) -> Router {
     let limit = state.body_limit;

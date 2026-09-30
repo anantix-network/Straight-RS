@@ -18,7 +18,12 @@ mod common {
 use common::{fake_gateway::FakeGateway, mock_lavalink::MockLavalink};
 
 const TOKEN: &str = "synthetic-test-api-token-32-bytes-long";
-async fn app() -> axum::Router {
+struct Harness {
+    router: axum::Router,
+    _worker: straight_rs_worker::RunningWorker,
+    _mock: MockLavalink,
+}
+async fn app() -> Harness {
     let lavalink = MockLavalink::start().await;
     let config = WorkerConfigBuilder::new(
         UserId(9),
@@ -31,13 +36,16 @@ async fn app() -> axum::Router {
     )
     .build()
     .unwrap();
-    // Keep the mock alive for the lifetime of the worker's client connection.
-    std::mem::forget(lavalink);
-    WorkerBuilder::new(config, FakeGateway)
+    let worker = WorkerBuilder::new(config, FakeGateway)
         .build()
         .await
-        .unwrap()
-        .router()
+        .unwrap();
+    let router = worker.router();
+    Harness {
+        router,
+        _worker: worker,
+        _mock: lavalink,
+    }
 }
 fn request(uri: &str, auth: Option<&str>, body: &str) -> Request<Body> {
     let mut builder = if uri == "/healthz" || uri == "/not-found" {
@@ -60,6 +68,7 @@ fn request(uri: &str, auth: Option<&str>, body: &str) -> Request<Body> {
 async fn missing_auth_is_rejected() {
     let response = app()
         .await
+        .router
         .oneshot(
             Request::get("/healthz")
                 .extension(ConnectInfo(
@@ -77,6 +86,7 @@ async fn malformed_auth_is_rejected() {
     for value in ["Bearer", "Basic abc", "Bearer wrong"] {
         let response = app()
             .await
+            .router
             .oneshot(request("/healthz", Some(value), ""))
             .await
             .unwrap();
@@ -88,6 +98,7 @@ async fn oversized_body_is_rejected_with_sanitized_413() {
     let body = format!("{{\"identifier\":\"{}\"}}", "x".repeat(1_048_576));
     let response = app()
         .await
+        .router
         .oneshot(request(
             "/v1/guilds/1/play",
             Some(&format!("Bearer {TOKEN}")),
@@ -109,12 +120,14 @@ async fn oversized_body_is_rejected_with_sanitized_413() {
 async fn authorized_health_and_invalid_route_are_structured() {
     let app = app().await;
     let response = app
+        .router
         .clone()
         .oneshot(request("/healthz", Some(&format!("Bearer {TOKEN}")), ""))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let response = app
+        .router
         .oneshot(request("/not-found", Some(&format!("Bearer {TOKEN}")), ""))
         .await
         .unwrap();

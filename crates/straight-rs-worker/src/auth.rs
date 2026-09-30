@@ -9,7 +9,7 @@ use axum::{
 use serde::Serialize;
 use std::{
     collections::HashMap,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -29,7 +29,7 @@ struct Bucket {
 struct Inner {
     token: Box<[u8]>,
     limits: RateLimitConfig,
-    buckets: Mutex<HashMap<SocketAddr, Bucket>>,
+    buckets: Mutex<HashMap<IpAddr, Bucket>>,
 }
 #[derive(Clone)]
 pub struct AuthState(Arc<Inner>);
@@ -46,7 +46,7 @@ impl AuthState {
             buckets: Mutex::new(HashMap::new()),
         }))
     }
-    fn admit(&self, peer: SocketAddr) -> bool {
+    fn admit(&self, peer: IpAddr) -> bool {
         let mut buckets = self.0.buckets.lock().expect("rate limiter lock poisoned");
         let now = Instant::now();
         if let Some(bucket) = buckets.get_mut(&peer) {
@@ -103,7 +103,11 @@ async fn authenticate(State(state): State<AuthState>, request: Request, next: Ne
         .headers()
         .get(AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
+        .and_then(|h| {
+            h.get(..7)
+                .filter(|scheme| scheme.eq_ignore_ascii_case("Bearer "))
+                .map(|_| &h[7..])
+        })
         .map(|candidate| bool::from(candidate.as_bytes().ct_eq(state.0.token.as_ref())))
         .unwrap_or(false);
     if !valid {
@@ -120,7 +124,7 @@ async fn authenticate(State(state): State<AuthState>, request: Request, next: Ne
             "Request limit exceeded.",
         );
     };
-    if !state.admit(*peer) {
+    if !state.admit(peer.ip()) {
         return error_response(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limited",
@@ -132,16 +136,18 @@ async fn authenticate(State(state): State<AuthState>, request: Request, next: Ne
 async fn sanitize(request: Request, next: Next) -> Response {
     let response = next.run(request).await;
     let status = response.status();
-    if status.is_client_error()
-        && status != StatusCode::UNAUTHORIZED
-        && status != StatusCode::TOO_MANY_REQUESTS
-    {
+    if status.is_client_error() || status.is_server_error() {
         let (code, msg) = match status {
             StatusCode::NOT_FOUND => ("not_found", "Route or resource not found."),
+            StatusCode::UNAUTHORIZED => ("unauthorized", "A valid bearer token is required."),
+            StatusCode::TOO_MANY_REQUESTS => ("rate_limited", "Request limit exceeded."),
             StatusCode::PAYLOAD_TOO_LARGE => (
                 "body_too_large",
                 "Request body exceeds the configured limit.",
             ),
+            _ if status.is_server_error() => {
+                ("internal_error", "The request could not be completed.")
+            }
             _ => ("invalid_request", "Request is invalid."),
         };
         return error_response(status, code, msg);
@@ -166,8 +172,8 @@ mod tests {
                 table_capacity: 1,
             },
         );
-        assert!(s.admit("127.0.0.1:1".parse().unwrap()));
-        assert!(!s.admit("127.0.0.2:1".parse().unwrap()));
+        assert!(s.admit("127.0.0.1".parse().unwrap()));
+        assert!(!s.admit("127.0.0.2".parse().unwrap()));
     }
     #[test]
     fn debug_does_not_expose_secret() {
