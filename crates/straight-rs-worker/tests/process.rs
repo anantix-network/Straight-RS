@@ -3,7 +3,7 @@
 use axum::http::StatusCode;
 use std::{
     net::SocketAddr,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -75,16 +75,48 @@ impl GatewayDriver for VoiceGateway {
     }
 }
 
+#[test]
+fn child_process_timeout_kills_and_reaps_child() {
+    let mut command = Command::new("sleep");
+    command.arg("5");
+    let started = std::time::Instant::now();
+    let error = run_command_with_timeout(command, Duration::from_millis(50))
+        .expect_err("sleep should exceed the child process deadline");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+fn run_command_with_timeout(mut command: Command, timeout: Duration) -> std::io::Result<Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let started = std::time::Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output();
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("child process exceeded {timeout:?}"),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn run_probe(executable: &str, base_url: &str, operation: &str) -> Output {
-    Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .env("WORKER_API_BASE_URL", base_url)
         .env("WORKER_API_TOKEN", API_TOKEN)
         .env("GUILD_ID", GUILD_ID)
         .env("CHANNEL_ID", CHANNEL_ID)
         .env("TRACK_IDENTIFIER", TRACK_IDENTIFIER)
-        .arg(operation)
-        .output()
-        .expect("child probe should start")
+        .arg(operation);
+    run_command_with_timeout(command, Duration::from_secs(10))
+        .expect("child probe should finish before deadline")
 }
 
 fn child_success(output: Output) -> String {
@@ -135,6 +167,18 @@ async fn command_process_exit_keeps_worker_player_and_voice_snapshot_alive() {
     let executable = env!("CARGO_BIN_EXE_worker-client-probe");
 
     child_success(run_probe(executable, &base_url, "join-play"));
+    let patch = mock
+        .requests()
+        .into_iter()
+        .find(|request| {
+            request.method == "PATCH"
+                && request.path == format!("/v4/sessions/test-session/players/{GUILD_ID}")
+        })
+        .expect("play should forward voice credentials in a player PATCH");
+    assert_eq!(patch.body["voice"]["sessionId"], "synthetic-session");
+    assert_eq!(patch.body["voice"]["token"], "synthetic-voice-token");
+    assert_eq!(patch.body["voice"]["endpoint"], "voice.example:443");
+
     let player = query_player(&base_url).await;
     assert_eq!(player.status, StatusCode::OK);
     assert_eq!(player.body["connected"], true);
@@ -146,7 +190,13 @@ async fn command_process_exit_keeps_worker_player_and_voice_snapshot_alive() {
     );
 
     let requests_before_query = mock.requests();
-    child_success(run_probe(executable, &base_url, "query"));
+    let query_stdout = child_success(run_probe(executable, &base_url, "query"));
+    let child_player: serde_json::Value =
+        serde_json::from_str(&query_stdout).expect("query child should print player JSON");
+    assert_eq!(child_player["connected"], true);
+    assert_eq!(child_player["voiceChannelId"], CHANNEL_ID);
+    assert_eq!(child_player["track"]["identifier"], "id1");
+    assert!(child_player["positionMs"].is_number());
     let requests_after_query = mock.requests();
     assert_eq!(
         requests_after_query.len(),
