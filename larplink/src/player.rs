@@ -82,6 +82,15 @@ impl Player {
         self.inner.node_index()
     }
 
+    /// The node's current view of this player (`GET .../players/{guild}`).
+    ///
+    /// A player that was never sent to a node yields a 404 `Error::Lavalink`.
+    pub async fn fetch(&self) -> Result<crate::model::Player> {
+        let node = self.hub.node_for(&self.inner)?;
+        let sid = node.session_id().ok_or(Error::NoNode)?;
+        node.rest().get_player(&sid, self.inner.guild).await
+    }
+
     pub fn events(&self) -> PlayerEvents {
         PlayerEvents {
             rx: self.hub.events.subscribe(),

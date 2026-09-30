@@ -161,3 +161,40 @@ async fn in_flight_is_released_when_request_is_dropped() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn get_player_returns_one_player_or_404() {
+    let m = Mock::start().await;
+    let r = rest(&m);
+    let e = r.get_player("mock-session", GuildId(7)).await.unwrap_err();
+    assert!(matches!(e, Error::Lavalink { status: 404, .. }), "{e:?}");
+    let upd = UpdatePlayer {
+        volume: Some(40),
+        ..Default::default()
+    };
+    r.update_player("mock-session", GuildId(7), &upd, false)
+        .await
+        .unwrap();
+    let p = r.get_player("mock-session", GuildId(7)).await.unwrap();
+    assert_eq!((p.guild_id, p.volume), (GuildId(7), 40));
+    let gets = m.requests_matching("GET", "/v4/sessions/mock-session/players/7");
+    assert_eq!(gets.len(), 2);
+}
+
+#[tokio::test]
+async fn injected_patch_failure_is_a_lavalink_error_once() {
+    let m = Mock::start().await;
+    m.state
+        .fail_next_patches
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    let r = rest(&m);
+    let upd = UpdatePlayer::default();
+    let e = r
+        .update_player("mock-session", GuildId(7), &upd, false)
+        .await
+        .unwrap_err();
+    assert!(matches!(e, Error::Lavalink { status: 500, .. }), "{e:?}");
+    r.update_player("mock-session", GuildId(7), &upd, false)
+        .await
+        .unwrap();
+}

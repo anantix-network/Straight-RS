@@ -176,6 +176,12 @@ impl RestClient {
             .await
     }
 
+    /// `GET /v4/sessions/{session}/players/{guild}`: the server's view of one player.
+    pub async fn get_player(&self, session: &str, guild: GuildId) -> Result<Player> {
+        self.get_json(&format!("/v4/sessions/{}/players/{}", enc(session), guild))
+            .await
+    }
+
     pub async fn update_player(
         &self,
         session: &str,

@@ -210,3 +210,25 @@ async fn player_after_destroy_is_fresh_and_works() {
     assert_eq!(&*q.track().unwrap().encoded, "DEF");
     assert!(matches!(p.pause(true).await, Err(Error::PlayerNotFound)));
 }
+
+#[tokio::test]
+async fn fetch_returns_the_server_view_of_the_player() {
+    let mock = Mock::start().await;
+    let c = client(&[&mock]).await;
+    let p = c.player(GuildId(42));
+    p.play(&sample_track("ABC")).await.unwrap();
+    p.set_volume(33).await.unwrap();
+    let remote = p.fetch().await.unwrap();
+    assert_eq!(remote.guild_id, GuildId(42));
+    assert_eq!(remote.volume, 33);
+    assert_eq!(&*remote.track.unwrap().encoded, "ABC");
+    assert_eq!(mock.requests_matching("GET", G).len(), 1);
+}
+
+#[tokio::test]
+async fn fetch_of_unknown_player_is_a_404() {
+    let mock = Mock::start().await;
+    let c = client(&[&mock]).await;
+    let e = c.player(GuildId(42)).fetch().await.unwrap_err();
+    assert!(matches!(e, Error::Lavalink { status: 404, .. }), "{e:?}");
+}

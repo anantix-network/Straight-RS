@@ -40,6 +40,11 @@ pub struct MockState {
     pub delete_delay_ms: AtomicU32,
     pub in_flight: AtomicU32,
     pub max_in_flight: AtomicU32,
+    /// Player PATCHes to fail with a 500 before succeeding again.
+    pub fail_next_patches: AtomicU32,
+    /// When set, a non-resumed websocket connection forgets all players
+    /// (like a real Lavalink creating a fresh session).
+    pub forget_players_on_new_session: AtomicBool,
     players: Mutex<HashMap<String, Value>>,
     push: broadcast::Sender<Push>,
 }
@@ -76,6 +81,8 @@ impl Mock {
             delete_delay_ms: AtomicU32::new(0),
             in_flight: AtomicU32::new(0),
             max_in_flight: AtomicU32::new(0),
+            fail_next_patches: AtomicU32::new(0),
+            forget_players_on_new_session: AtomicBool::new(false),
             players: Mutex::new(HashMap::new()),
             push,
         });
@@ -171,8 +178,11 @@ async fn ws_handler(
 
 async fn ws_session(s: Arc<MockState>, mut socket: WebSocket) {
     let mut rx = s.push.subscribe();
-    let ready =
-        json!({"op": "ready", "resumed": s.resumed.load(SeqCst), "sessionId": s.session_id});
+    let resumed = s.resumed.load(SeqCst);
+    if !resumed && s.forget_players_on_new_session.load(SeqCst) {
+        s.players.lock().unwrap().clear();
+    }
+    let ready = json!({"op": "ready", "resumed": resumed, "sessionId": s.session_id});
     if socket.send(Message::Text(ready.to_string())).await.is_err() {
         return;
     }
@@ -248,9 +258,23 @@ async fn rest_handler(
             if delay > 0 {
                 tokio::time::sleep(Duration::from_millis(u64::from(delay))).await;
             }
+            if s
+                .fail_next_patches
+                .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"timestamp": 1, "status": 500,
+                    "error": "Internal Server Error", "message": "injected failure", "path": path})))
+                    .into_response();
+            }
             let out = merge_player(&s, gid, &body_json);
             Json(out).into_response()
         }
+        ("GET", ["v4", "sessions", _, "players", gid]) => match s.players.lock().unwrap().get(*gid) {
+            Some(p) => Json(p.clone()).into_response(),
+            None => (StatusCode::NOT_FOUND, Json(json!({"timestamp": 1, "status": 404, "error": "Not Found",
+                "message": "Player not found", "path": path}))).into_response(),
+        },
         ("DELETE", ["v4", "sessions", _, "players", gid]) => {
             let delay = s.delete_delay_ms.load(SeqCst);
             if delay > 0 {
