@@ -27,6 +27,7 @@ pub struct MockLavalink {
     #[allow(dead_code)]
     load_body: Arc<Mutex<Value>>,
     load_count: Arc<std::sync::atomic::AtomicUsize>,
+    frames: tokio::sync::broadcast::Sender<String>,
 }
 
 pub fn synthetic_track(encoded: &str) -> Value {
@@ -48,6 +49,7 @@ impl MockLavalink {
         async fn ws_handler(
             upgrade: WebSocketUpgrade,
             mut release: tokio::sync::watch::Receiver<bool>,
+            mut frames: tokio::sync::broadcast::Receiver<String>,
         ) -> impl IntoResponse {
             upgrade.on_upgrade(move |mut socket| async move {
                 if !*release.borrow() {
@@ -55,9 +57,20 @@ impl MockLavalink {
                 }
                 let ready = r#"{"op":"ready","resumed":false,"sessionId":"test-session"}"#;
                 let _ = socket.send(Message::Text(ready.into())).await;
-                while socket.recv().await.is_some() {}
+                loop {
+                    tokio::select! {
+                        incoming = socket.recv() => if incoming.is_none() { break },
+                        frame = frames.recv() => match frame {
+                            Ok(text) => { let _ = socket.send(Message::Text(text.into())).await; }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(_) => break,
+                        },
+                    }
+                }
             })
         }
+        let (frames_tx, _) = tokio::sync::broadcast::channel::<String>(64);
+        let frames_handle = frames_tx.clone();
         let (ready_release, ready_rx) = tokio::sync::watch::channel(!paused);
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = requests.clone();
@@ -65,7 +78,7 @@ impl MockLavalink {
         let load_handle = load_body.clone();
         let load_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let load_counter = load_count.clone();
-        let app = Router::new().route("/v4/websocket", get(move |upgrade: WebSocketUpgrade| ws_handler(upgrade, ready_rx.clone()))).fallback(move |method: Method, uri: axum::http::Uri, body: Bytes| {
+        let app = Router::new().route("/v4/websocket", get(move |upgrade: WebSocketUpgrade| ws_handler(upgrade, ready_rx.clone(), frames_tx.subscribe()))).fallback(move |method: Method, uri: axum::http::Uri, body: Bytes| {
             let recorded = recorded.clone();
             async move {
                 let value = serde_json::from_slice(&body).unwrap_or(Value::Null);
@@ -96,7 +109,19 @@ impl MockLavalink {
             ready_release,
             load_body: load_handle,
             load_count,
+            frames: frames_handle,
         }
+    }
+    /// Push a synthetic websocket text frame to every connected client.
+    #[allow(dead_code)]
+    pub fn push_frame(&self, text: String) {
+        let _ = self.frames.send(text);
+    }
+    #[allow(dead_code)]
+    pub fn push_track_end(&self, guild: u64, encoded: &str, reason: &str) {
+        self.push_frame(
+            serde_json::json!({"op":"event","type":"TrackEndEvent","guildId":guild.to_string(),"track":synthetic_track(encoded),"reason":reason}).to_string(),
+        );
     }
     #[allow(dead_code)]
     pub fn load_requests(&self) -> usize {

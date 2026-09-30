@@ -19,6 +19,7 @@ pub struct WorkerApiState {
     pub voice: VoiceStateStore,
     pub gateway: Arc<dyn straight_rs::VoiceGateway>,
     pub status: Arc<dyn Fn() -> WorkerStatus + Send + Sync>,
+    pub plugins: Arc<dyn Fn() -> Vec<crate::plugin::PluginHealth> + Send + Sync>,
     pub body_limit: usize,
     pub deadline: Duration,
 }
@@ -99,6 +100,19 @@ struct Volume {
     volume: u16,
 }
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginHealthView {
+    name: &'static str,
+    required: bool,
+    status: crate::plugin::PluginStatus,
+    dropped_events: u64,
+}
+#[derive(Serialize)]
+struct HealthWithPlugins {
+    status: &'static str,
+    plugins: Vec<PluginHealthView>,
+}
+#[derive(Serialize)]
 struct Health {
     status: &'static str,
 }
@@ -127,8 +141,19 @@ fn not_ready() -> axum::response::Response {
         "Playback service is unavailable.",
     )
 }
-async fn health() -> Json<Health> {
-    Json(Health { status: "ok" })
+async fn health(State(s): State<Arc<WorkerApiState>>) -> Json<HealthWithPlugins> {
+    Json(HealthWithPlugins {
+        status: "ok",
+        plugins: (s.plugins)()
+            .into_iter()
+            .map(|p| PluginHealthView {
+                name: p.name,
+                required: p.required,
+                status: p.status,
+                dropped_events: p.dropped_events,
+            })
+            .collect(),
+    })
 }
 async fn ready(State(s): State<Arc<WorkerApiState>>) -> axum::response::Response {
     if (s.status)().ready {

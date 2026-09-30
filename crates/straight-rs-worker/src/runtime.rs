@@ -2,13 +2,17 @@ use crate::{
     config::WorkerConfig,
     error::{WorkerError, WorkerResult},
     gateway::{GatewayDriver, GatewayEvent, GatewayVoiceProxy},
+    plugin::{
+        PluginHealth, PluginHost, PluginRegistration, StatusPublisher, WorkerContext, WorkerEvent,
+        WorkerPlugin,
+    },
     state::{StatusState, VoiceStateStore, WorkerStatus},
 };
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use straight_rs::{Event, LavalinkClient};
+use straight_rs::LavalinkClient;
 use tokio::{
     net::TcpListener,
     sync::{mpsc, watch},
@@ -18,10 +22,31 @@ use tokio::{
 pub struct WorkerBuilder<D> {
     config: WorkerConfig,
     gateway: D,
+    plugins: Vec<PluginRegistration>,
 }
 impl<D: GatewayDriver> WorkerBuilder<D> {
     pub fn new(config: WorkerConfig, gateway: D) -> Self {
-        Self { config, gateway }
+        Self {
+            config,
+            gateway,
+            plugins: Vec::new(),
+        }
+    }
+    /// Register a required plugin: a startup failure, panic or timeout fails `build()`.
+    pub fn plugin(mut self, plugin: impl WorkerPlugin) -> Self {
+        self.plugins.push(PluginRegistration {
+            plugin: Arc::new(plugin),
+            required: true,
+        });
+        self
+    }
+    /// Register an optional plugin: a startup failure only marks it unhealthy.
+    pub fn optional_plugin(mut self, plugin: impl WorkerPlugin) -> Self {
+        self.plugins.push(PluginRegistration {
+            plugin: Arc::new(plugin),
+            required: false,
+        });
+        self
     }
     pub async fn build(self) -> WorkerResult<RunningWorker> {
         let WorkerConfig {
@@ -36,6 +61,7 @@ impl<D: GatewayDriver> WorkerBuilder<D> {
             limiter_table_capacity,
             body_limit,
             callback_timeout,
+            plugin_event_capacity,
             ..
         } = self.config;
         let (commands_tx, commands_rx) = mpsc::channel(64);
@@ -67,13 +93,41 @@ impl<D: GatewayDriver> WorkerBuilder<D> {
         let degraded = Arc::new(AtomicBool::new(false));
         let lagged = Arc::new(AtomicU64::new(0));
         let voice = VoiceStateStore::default();
+        let status_state = StatusState {
+            gateway_ready: gateway_ready.clone(),
+            degraded: degraded.clone(),
+            lagged: lagged.clone(),
+            lavalink: client.clone(),
+        };
+        let (status_tx, status_rx) = watch::channel(status_state.snapshot());
+        let context = WorkerContext::new(client.clone(), status_rx);
+        let mut plugins = PluginHost::new(self.plugins, plugin_event_capacity);
+        if let Err(error) = plugins.start(&context, callback_timeout).await {
+            // Unwind everything already started before reporting the failure.
+            let _ = gateway_shutdown_tx.send(true);
+            let deadline = tokio::time::Instant::now() + shutdown_timeout;
+            plugins.shutdown(&context, callback_timeout, deadline).await;
+            client.shutdown();
+            let mut gateway_task = gateway_task;
+            if tokio::time::timeout_at(deadline, &mut gateway_task)
+                .await
+                .is_err()
+            {
+                gateway_task.abort();
+                let _ = gateway_task.await;
+            }
+            return Err(error);
+        }
+        let mut publisher = StatusPublisher::new(status_tx, plugins.dispatch.clone());
         let relay_voice = voice.clone();
         let relay_client = client.clone();
         let relay_ready = gateway_ready.clone();
         let relay_degraded = degraded.clone();
         let relay_lagged = lagged.clone();
+        let relay_status = status_state.clone();
         let relay_bot_id = bot_user_id;
         let relay_task = tokio::spawn(async move {
+            publisher.publish(&relay_status);
             loop {
                 tokio::select! {
                     event = gateway_rx.recv() => match event {
@@ -82,24 +136,27 @@ impl<D: GatewayDriver> WorkerBuilder<D> {
                         Some(GatewayEvent::VoiceState { user_id, guild, update }) if user_id == relay_bot_id => { relay_voice.update(guild, update.channel_id); if relay_client.voice_state_update(guild, update).await.is_err() { relay_degraded.store(true, Ordering::Release); } }
                         Some(GatewayEvent::VoiceState { .. }) => {}
                         Some(GatewayEvent::VoiceServer { guild, update }) => { if relay_client.voice_server_update(guild, update).await.is_err() { relay_degraded.store(true, Ordering::Release); } }
-                        None => { relay_degraded.store(true, Ordering::Release); break; }
+                        None => { relay_degraded.store(true, Ordering::Release); publisher.publish(&relay_status); break; }
                     },
                     event = events.recv() => match event {
-                        Ok(Event::Ready { .. }) => {}, Ok(_) => {},
+                        Ok(event) => {
+                            if let Some(mapped) = WorkerEvent::from_lavalink(&event) {
+                                publisher.publish(&relay_status);
+                                publisher.dispatch(mapped);
+                            }
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => { relay_lagged.fetch_add(n, Ordering::Relaxed); },
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => { relay_degraded.store(true, Ordering::Release); break; }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => { relay_degraded.store(true, Ordering::Release); publisher.publish(&relay_status); break; }
                     }
                 }
+                publisher.publish(&relay_status);
             }
         });
         Ok(RunningWorker {
-            client: Some(client.clone()),
-            status: StatusState {
-                gateway_ready,
-                degraded,
-                lagged,
-                lavalink: client,
-            },
+            client: Some(client),
+            status: status_state,
+            plugins,
+            context,
             voice,
             voice_gateway,
             api_token,
@@ -119,6 +176,8 @@ impl<D: GatewayDriver> WorkerBuilder<D> {
 pub struct RunningWorker {
     client: Option<LavalinkClient>,
     status: StatusState,
+    plugins: PluginHost,
+    context: WorkerContext,
     #[allow(dead_code)]
     voice: VoiceStateStore,
     voice_gateway: Arc<dyn straight_rs::VoiceGateway>,
@@ -142,6 +201,10 @@ impl RunningWorker {
             voice: self.voice.clone(),
             gateway: self.voice_gateway.clone(),
             status: Arc::new(move || status.snapshot()),
+            plugins: {
+                let dispatch = self.plugins.dispatch.clone();
+                Arc::new(move || dispatch.health())
+            },
             body_limit: self.body_limit,
             deadline: self.callback_timeout,
         });
@@ -157,6 +220,10 @@ impl RunningWorker {
     }
     pub fn status(&self) -> WorkerStatus {
         self.status.snapshot()
+    }
+    /// Per-plugin health in registration order.
+    pub fn plugin_health(&self) -> Vec<PluginHealth> {
+        self.plugins.health()
     }
     #[allow(dead_code)]
     pub(crate) fn voice_channel(
@@ -189,13 +256,16 @@ impl RunningWorker {
         self.shutdown().await
     }
     pub async fn shutdown(&mut self) -> WorkerResult<()> {
+        let deadline = tokio::time::Instant::now() + self.shutdown_timeout;
+        self.plugins
+            .shutdown(&self.context, self.callback_timeout, deadline)
+            .await;
         if let Some(tx) = self.gateway_shutdown.take() {
             let _ = tx.send(true);
         }
         if let Some(client) = self.client.take() {
             client.shutdown();
         }
-        let deadline = tokio::time::Instant::now() + self.shutdown_timeout;
         let mut failure = None;
         if let Some(mut task) = self.gateway_task.take() {
             match tokio::time::timeout_at(deadline, &mut task).await {
@@ -235,6 +305,7 @@ impl RunningWorker {
 }
 impl Drop for RunningWorker {
     fn drop(&mut self) {
+        self.plugins.abort();
         if let Some(tx) = self.gateway_shutdown.take() {
             let _ = tx.send(true);
         }
