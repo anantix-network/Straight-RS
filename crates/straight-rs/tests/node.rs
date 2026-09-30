@@ -30,6 +30,19 @@ async fn connects_with_auth_headers_and_enables_resume() {
 }
 
 #[tokio::test]
+async fn build_with_events_captures_immediate_ready_event() {
+    let mock = Mock::start().await;
+    let mut builder = straight_rs::LavalinkClient::builder(straight_rs::UserId(1));
+    builder = builder.node(straight_rs::NodeConfig::new(mock.host(), "pw"));
+    let (_client, mut events) = builder.build_with_events().await.unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .expect("Ready was not captured")
+        .expect("event channel closed");
+    assert!(matches!(event, Event::Ready { .. }));
+}
+
+#[tokio::test]
 async fn reconnects_after_drop_and_sends_session_id() {
     let mock = Mock::start().await;
     let c = client(&[&mock]).await;

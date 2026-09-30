@@ -62,8 +62,8 @@ impl ClientBuilder {
         self
     }
 
-    /// Spawns one task per node; does not wait for connections (see `wait_ready`).
-    pub async fn build(self) -> Result<LavalinkClient> {
+    /// Spawns node tasks and returns an event receiver subscribed before they start.
+    pub async fn build_with_events(self) -> Result<(LavalinkClient, broadcast::Receiver<Event>)> {
         if self.nodes.is_empty() {
             return Err(Error::Config("at least one node is required".into()));
         }
@@ -91,6 +91,7 @@ impl ClientBuilder {
             .map(|(i, cfg)| Node::new(i, cfg, &self.client_name))
             .collect();
         let (events, _) = broadcast::channel(self.event_capacity);
+        let receiver = events.subscribe();
         let hub = Arc::new(Hub::new(
             self.user_id,
             self.client_name,
@@ -102,10 +103,18 @@ impl ClientBuilder {
         for node in &hub.nodes {
             tokio::spawn(node.clone().run(hub.clone()));
         }
-        Ok(LavalinkClient {
-            _guard: Arc::new(ShutdownGuard(hub.clone())),
-            hub,
-        })
+        Ok((
+            LavalinkClient {
+                _guard: Arc::new(ShutdownGuard(hub.clone())),
+                hub,
+            },
+            receiver,
+        ))
+    }
+
+    /// Spawns one task per node; does not wait for connections (see `wait_ready`).
+    pub async fn build(self) -> Result<LavalinkClient> {
+        self.build_with_events().await.map(|(client, _)| client)
     }
 }
 
