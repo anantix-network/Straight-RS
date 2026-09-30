@@ -120,6 +120,14 @@ impl Node {
             .await
             .map(String::as_str)
     }
+    /// Whether this Lavalink version can speak DAVE, Discord's end-to-end encrypted
+    /// voice protocol (first supported in Lavalink 4.2.0). Discord requires DAVE for
+    /// voice calls, so older servers get their voice connections closed with code 4017
+    /// (see [`Event::is_dave_required`]). Fetches `/v4/info` once and caches it.
+    pub async fn supports_dave(&self) -> Result<bool> {
+        Ok(dave_supported(self.info().await?))
+    }
+
     pub async fn route_planner_status(&self) -> Result<RoutePlannerStatus> {
         self.rest.route_planner_status().await
     }
@@ -232,6 +240,7 @@ impl Node {
                 self.set_status(NodeStatus::Ready);
                 backoff.reset();
                 self.enable_resume(hub, r.session_id.clone());
+                self.warn_without_dave(hub);
                 hub.emit(Event::Ready {
                     node: self.index,
                     resumed: r.resumed,
@@ -254,6 +263,25 @@ impl Node {
         }
     }
 
+    /// Logs a warning once per connection if the server predates DAVE support.
+    fn warn_without_dave(self: &Arc<Self>, hub: &Arc<Hub>) {
+        let node = self.clone();
+        let hub = hub.clone();
+        tokio::spawn(async move {
+            hub.unless_closed(async {
+                match node.supports_dave().await {
+                    Ok(true) => {}
+                    Ok(false) => tracing::warn!(
+                        node = node.index,
+                        "Lavalink is older than 4.2.0 and cannot speak DAVE; Discord closes voice connections without it (close code 4017). Upgrade Lavalink."
+                    ),
+                    Err(e) => tracing::debug!(node = node.index, error = %e, "could not check DAVE support"),
+                }
+            })
+            .await;
+        });
+    }
+
     fn enable_resume(self: &Arc<Self>, hub: &Arc<Hub>, session: String) {
         let node = self.clone();
         let hub = hub.clone();
@@ -270,4 +298,9 @@ impl Node {
             .await;
         });
     }
+}
+
+/// DAVE needs Lavalink 4.2.0 or newer.
+fn dave_supported(info: &Info) -> bool {
+    (info.version.major, info.version.minor) >= (4, 2)
 }

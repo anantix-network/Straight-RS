@@ -1,4 +1,7 @@
 use crate::TrackEndReason;
+
+/// Voice close code meaning "this voice server requires DAVE (E2EE)".
+pub const DAVE_REQUIRED_CLOSE_CODE: u16 = 4017;
 use serde_json::Value;
 use std::sync::Arc;
 use straight_rs_model::{self as model, Exception, GuildId, PlayerState, Stats, Track};
@@ -80,6 +83,13 @@ impl Event {
             | Self::PlayerMigrated { guild, .. } => Some(*guild),
             _ => None,
         }
+    }
+
+    /// True when Discord closed the voice connection with code 4017: the voice server
+    /// requires DAVE (end-to-end encrypted voice) and Lavalink did not speak it.
+    /// Upgrade Lavalink to 4.2.0 or newer.
+    pub fn is_dave_required(&self) -> bool {
+        matches!(self, Self::WebSocketClosed { code, .. } if *code == DAVE_REQUIRED_CLOSE_CODE)
     }
 
     /// True for `TrackEnd` events after which a queue may start the next track.

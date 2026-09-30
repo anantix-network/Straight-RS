@@ -63,7 +63,7 @@ impl VoiceAssembler {
     /// A complete connection handed over as a whole (e.g. from songbird).
     pub(crate) fn set(&mut self, vs: &VoiceState) {
         self.session_id = Some(vs.session_id.clone());
-        self.channel_id = vs.channel_id;
+        self.channel_id = Some(vs.channel_id);
         self.token = Some(vs.token.clone());
         self.endpoint = Some(vs.endpoint.clone());
     }
@@ -82,16 +82,19 @@ impl VoiceAssembler {
 
     /// The latest complete voice state, whether or not a node has it yet.
     pub(crate) fn latest(&self) -> Option<VoiceState> {
-        let (Some(session_id), Some(token), Some(endpoint)) =
-            (&self.session_id, &self.token, &self.endpoint)
-        else {
+        let (Some(session_id), Some(token), Some(endpoint), Some(channel_id)) = (
+            &self.session_id,
+            &self.token,
+            &self.endpoint,
+            self.channel_id,
+        ) else {
             return None;
         };
         Some(VoiceState {
             token: token.clone(),
             endpoint: endpoint.clone(),
             session_id: session_id.clone(),
-            channel_id: self.channel_id,
+            channel_id,
         })
     }
 
@@ -138,7 +141,7 @@ mod tests {
                 v.session_id.as_str(),
                 v.channel_id
             ),
-            ("tok", "e.discord.media:443", "sess", Some(ChannelId(9)))
+            ("tok", "e.discord.media:443", "sess", ChannelId(9))
         );
     }
     #[test]
@@ -215,7 +218,7 @@ mod tests {
             token: "t".into(),
             endpoint: "e".into(),
             session_id: "s".into(),
-            channel_id: Some(ChannelId(3)),
+            channel_id: ChannelId(3),
         };
         a.set(&vs);
         assert_eq!(a.latest(), Some(vs));

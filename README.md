@@ -105,6 +105,20 @@ bot joins. Your Discord library receives them as events; you just pass them on:
   (`join` / `leave`) and pass it to `ClientBuilder::gateway`. Then
   `player.join(channel)` and `player.leave()` work.
 
+## DAVE (end-to-end encrypted voice)
+
+Since March 2026 Discord requires DAVE, its end-to-end encryption for voice.
+The encryption itself runs inside Lavalink, so you only need:
+
+- **Lavalink 4.2.0 or newer.** Older servers cannot speak DAVE and Discord closes
+  their voice connections with code 4017. Straight-RS logs a warning when it
+  connects to such a node, and `node.supports_dave().await` tells you in code.
+- **The voice channel id with every voice state.** Straight-RS always sends it
+  (`VoiceState::channel_id` is required), so there is nothing extra to do when
+  you use `voice_state_update` / `voice_server_update` or the adapters.
+- If Discord closes a voice connection with 4017 anyway, you receive
+  `Event::WebSocketClosed`; `event.is_dave_required()` is true for it.
+
 ## Controlling playback
 
 `client.player(guild)` gives you a cheap handle you can clone and share freely.

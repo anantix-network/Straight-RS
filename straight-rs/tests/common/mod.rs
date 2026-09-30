@@ -36,6 +36,8 @@ pub struct MockState {
     pub session_id: String,
     pub load_response: Mutex<Option<(u16, String)>>,
     pub fail_next_gets: AtomicU32,
+    /// Lavalink version the mock reports on `/version` and `/v4/info`.
+    pub server_version: Mutex<(u32, u32, u32)>,
     pub patch_delay_ms: AtomicU32,
     pub delete_delay_ms: AtomicU32,
     pub in_flight: AtomicU32,
@@ -77,6 +79,7 @@ impl Mock {
             session_id: "mock-session".into(),
             load_response: Mutex::new(None),
             fail_next_gets: AtomicU32::new(0),
+            server_version: Mutex::new((4, 0, 8)),
             patch_delay_ms: AtomicU32::new(0),
             delete_delay_ms: AtomicU32::new(0),
             in_flight: AtomicU32::new(0),
@@ -121,6 +124,9 @@ impl Mock {
         let _ = self.kill.send(true);
         self.server.abort();
         self.close_ws();
+    }
+    pub fn set_version(&self, major: u32, minor: u32, patch: u32) {
+        *self.state.server_version.lock().unwrap() = (major, minor, patch);
     }
     pub fn set_resumed(&self, v: bool) {
         self.state.resumed.store(v, SeqCst);
@@ -262,8 +268,7 @@ async fn rest_handler(
             if delay > 0 {
                 tokio::time::sleep(Duration::from_millis(u64::from(delay))).await;
             }
-            if s
-                .fail_next_patches
+            if s.fail_next_patches
                 .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
                 .is_ok()
             {
@@ -274,10 +279,15 @@ async fn rest_handler(
             let out = merge_player(&s, gid, &body_json);
             Json(out).into_response()
         }
-        ("GET", ["v4", "sessions", _, "players", gid]) => match s.players.lock().unwrap().get(*gid) {
+        ("GET", ["v4", "sessions", _, "players", gid]) => match s.players.lock().unwrap().get(*gid)
+        {
             Some(p) => Json(p.clone()).into_response(),
-            None => (StatusCode::NOT_FOUND, Json(json!({"timestamp": 1, "status": 404, "error": "Not Found",
-                "message": "Player not found", "path": path}))).into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"timestamp": 1, "status": 404, "error": "Not Found",
+                "message": "Player not found", "path": path})),
+            )
+                .into_response(),
         },
         ("DELETE", ["v4", "sessions", _, "players", gid]) => {
             let delay = s.delete_delay_ms.load(SeqCst);
@@ -289,26 +299,39 @@ async fn rest_handler(
         }
         ("PATCH", ["v4", "sessions", _]) => Json(json!({
             "resuming": body_json.get("resuming").and_then(Value::as_bool).unwrap_or(false),
-            "timeout": body_json.get("timeout").and_then(Value::as_u64).unwrap_or(60)})).into_response(),
+            "timeout": body_json.get("timeout").and_then(Value::as_u64).unwrap_or(60)}))
+        .into_response(),
         ("GET", ["v4", "loadtracks"]) => match s.load_response.lock().unwrap().clone() {
             Some((code, text)) => (StatusCode::from_u16(code).unwrap(), text).into_response(),
             None => Json(json!({"loadType": "empty", "data": {}})).into_response(),
         },
         ("GET", ["v4", "decodetrack"]) => Json(track_json("QAAA")).into_response(),
         ("POST", ["v4", "decodetracks"]) => Json(json!([track_json("QAAA")])).into_response(),
-        ("GET", ["version"]) => "4.0.8".into_response(),
-        ("GET", ["v4", "info"]) => Json(json!({"version": {"semver": "4.0.8", "major": 4, "minor": 0, "patch": 8,
+        ("GET", ["version"]) => {
+            let (a, b, c) = *s.server_version.lock().unwrap();
+            format!("{a}.{b}.{c}").into_response()
+        }
+        ("GET", ["v4", "info"]) => {
+            let (a, b, c) = *s.server_version.lock().unwrap();
+            Json(json!({"version": {"semver": format!("{a}.{b}.{c}"), "major": a, "minor": b, "patch": c,
             "preRelease": null, "build": null}, "buildTime": 1, "git": {"branch": "m", "commit": "c", "commitTime": 1},
-            "jvm": "17", "lavaplayer": "2", "sourceManagers": ["youtube"], "filters": ["volume"], "plugins": []})).into_response(),
+            "jvm": "17", "lavaplayer": "2", "sourceManagers": ["youtube"], "filters": ["volume"], "plugins": []})).into_response()
+        }
         ("GET", ["v4", "stats"]) => Json(json!({"players": 3, "playingPlayers": 1, "uptime": 9,
             "memory": {"free": 1, "used": 1, "allocated": 1, "reservable": 1},
-            "cpu": {"cores": 2, "systemLoad": 0.0, "lavalinkLoad": 0.0}, "frameStats": null})).into_response(),
-        ("GET", ["v4", "routeplanner", "status"]) => Json(json!({"class": null, "details": null})).into_response(),
-        ("POST", ["v4", "routeplanner", "free", "address"]) | ("POST", ["v4", "routeplanner", "free", "all"]) => {
-            StatusCode::NO_CONTENT.into_response()
+            "cpu": {"cores": 2, "systemLoad": 0.0, "lavalinkLoad": 0.0}, "frameStats": null}))
+        .into_response(),
+        ("GET", ["v4", "routeplanner", "status"]) => {
+            Json(json!({"class": null, "details": null})).into_response()
         }
-        _ => (StatusCode::NOT_FOUND, Json(json!({"timestamp": 1, "status": 404, "error": "Not Found",
-            "message": "Session not found", "path": path}))).into_response(),
+        ("POST", ["v4", "routeplanner", "free", "address"])
+        | ("POST", ["v4", "routeplanner", "free", "all"]) => StatusCode::NO_CONTENT.into_response(),
+        _ => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"timestamp": 1, "status": 404, "error": "Not Found",
+            "message": "Session not found", "path": path})),
+        )
+            .into_response(),
     }
 }
 

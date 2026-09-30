@@ -121,6 +121,36 @@ fn player_response_parses() {
 }
 
 #[test]
+fn player_response_voice_without_channel_id_still_parses() {
+    // Lavalink < 4.2 (and players that never joined) report no channelId.
+    let v = json!({"guildId":"1","track":null,"volume":100,"paused":false,
+        "state":{"time":1,"position":2,"connected":false,"ping":-1},
+        "voice":{"token":"","endpoint":"","sessionId":""},"filters":{}});
+    let p: Player = serde_json::from_value(v).unwrap();
+    assert_eq!(p.voice.channel_id, None);
+}
+
+#[test]
+fn voice_state_always_sends_channel_id_for_dave() {
+    // DAVE (E2EE voice, Lavalink >= 4.2.0) requires `channelId` in every voice state.
+    let vs = VoiceState {
+        token: "t".into(),
+        endpoint: "e".into(),
+        session_id: "s".into(),
+        channel_id: ChannelId(9),
+    };
+    assert_eq!(
+        serde_json::to_value(&vs).unwrap(),
+        json!({"token":"t","endpoint":"e","sessionId":"s","channelId":"9"})
+    );
+    assert!(
+        serde_json::from_value::<VoiceState>(json!({"token":"t","endpoint":"e","sessionId":"s"}))
+            .is_err(),
+        "a voice state without channelId must not deserialize"
+    );
+}
+
+#[test]
 fn filters_all_variants_roundtrip() {
     let v = json!({"volume":1.0,"equalizer":[{"band":1,"gain":0.5}],
       "karaoke":{"level":1.0,"monoLevel":1.0,"filterBand":220.0,"filterWidth":100.0},

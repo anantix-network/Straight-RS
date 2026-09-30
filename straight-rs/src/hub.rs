@@ -502,7 +502,7 @@ impl Hub {
 mod tests {
     use super::*;
     use crate::config::NodeConfig;
-    use straight_rs_model::VoiceState;
+    use straight_rs_model::{ChannelId, VoiceState};
 
     fn hub() -> Arc<Hub> {
         let nodes = (0..2)
@@ -525,7 +525,7 @@ mod tests {
             token: "t".into(),
             endpoint: "e".into(),
             session_id: "s".into(),
-            channel_id: None,
+            channel_id: ChannelId(9),
         };
         lock(&p.voice).set(&vs);
     }
