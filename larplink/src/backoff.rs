@@ -20,7 +20,13 @@ impl Backoff {
         let exp = self.base.saturating_mul(1u32 << self.attempt.min(16));
         let capped = exp.min(self.max);
         self.attempt = self.attempt.saturating_add(1);
-        capped.mul_f64(0.5 + 0.5 * jitter.clamp(0.0, 1.0))
+        // NaN would survive `clamp` and make `mul_f64` panic; treat it as full delay.
+        let jitter = if jitter.is_nan() {
+            1.0
+        } else {
+            jitter.clamp(0.0, 1.0)
+        };
+        capped.mul_f64(0.5 + 0.5 * jitter)
     }
 
     pub(crate) fn reset(&mut self) {
@@ -49,6 +55,11 @@ mod tests {
         b.next_delay(0.0);
         b.reset();
         assert_eq!(b.next_delay(1.0), Duration::from_millis(500));
+    }
+    #[test]
+    fn nan_jitter_does_not_panic() {
+        let mut b = Backoff::new(Duration::from_millis(500), Duration::from_secs(30));
+        assert_eq!(b.next_delay(f64::NAN), Duration::from_millis(500));
     }
     #[test]
     fn huge_attempt_counts_do_not_overflow() {

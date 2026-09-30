@@ -10,7 +10,8 @@ pub enum Error {
     #[error("http client error: {0}")]
     HttpClient(#[from] hyper_util::client::legacy::Error),
     #[error("websocket error: {0}")]
-    Ws(#[from] tokio_tungstenite::tungstenite::Error),
+    // Boxed: tungstenite's error is large and would bloat every `Result`.
+    Ws(Box<tokio_tungstenite::tungstenite::Error>),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("lavalink error {status} {error}: {message} ({path})")]
@@ -32,4 +33,10 @@ pub enum Error {
     Config(String),
     #[error("voice gateway error: {0}")]
     Gateway(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl From<tokio_tungstenite::tungstenite::Error> for Error {
+    fn from(e: tokio_tungstenite::tungstenite::Error) -> Self {
+        Self::Ws(Box::new(e))
+    }
 }

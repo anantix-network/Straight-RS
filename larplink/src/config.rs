@@ -44,6 +44,6 @@ mod tests {
         let c = NodeConfig::new("localhost:2333", "pw");
         assert!(!c.secure);
         assert_eq!(c.resume_timeout_secs, 60);
-        assert_eq!(c.with_tls(true).secure, true);
+        assert!(c.with_tls(true).secure);
     }
 }

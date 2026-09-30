@@ -128,7 +128,7 @@ impl RestClient {
         loop {
             let res = self.send(Method::GET, path, None).await;
             let transient = match &res {
-                Ok((s, _)) => matches!(s.as_u16(), 502 | 503 | 504),
+                Ok((s, _)) => matches!(s.as_u16(), 502..=504),
                 Err(Error::Http(_) | Error::HttpClient(_) | Error::Timeout) => true,
                 Err(_) => false,
             };

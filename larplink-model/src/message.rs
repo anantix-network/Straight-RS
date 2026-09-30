@@ -77,6 +77,8 @@ impl Event {
     }
 }
 
+// Boxing would make the public enum awkward to match on; messages are short-lived and parsed once.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum WsMessage {
     Ready(Ready),
@@ -90,6 +92,8 @@ pub enum WsMessage {
     },
 }
 
+// Private mirror of `WsMessage`; same trade-off, boxing would only add allocations.
+#[allow(clippy::large_enum_variant)]
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "camelCase")]
 enum Known {
