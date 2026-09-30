@@ -17,6 +17,7 @@ use straight_rs::{GuildId, LavalinkClient, LoadResult};
 pub struct WorkerApiState {
     pub client: LavalinkClient,
     pub voice: VoiceStateStore,
+    pub gateway: Arc<dyn straight_rs::VoiceGateway>,
     pub status: Arc<dyn Fn() -> WorkerStatus + Send + Sync>,
     pub body_limit: usize,
     pub deadline: Duration,
@@ -182,8 +183,11 @@ async fn join(
     ) else {
         return invalid();
     };
-    let p = s.client.player(g);
-    act(s.clone(), async move { p.join(c).await }).await
+    let g2 = s.gateway.clone();
+    act(s.clone(), async move { g2.join(g, c).await }).await
+}
+fn no_player() -> axum::response::Response {
+    err(StatusCode::NOT_FOUND, "not_found", "Player not found.")
 }
 async fn play(
     State(s): State<Arc<WorkerApiState>>,
@@ -198,6 +202,13 @@ async fn play(
     }
     if !(s.status)().lavalink_ready {
         return not_ready();
+    }
+    if s.client.get_player(g).is_none() && s.voice.channel(g).is_none() {
+        return err(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "No active voice session for this guild.",
+        );
     }
     let c = s.client.clone();
     let deadline = s.deadline;
@@ -267,7 +278,9 @@ async fn pause(
     let Some(g) = parse::<u64>(&id).map(GuildId) else {
         return invalid();
     };
-    let p = s.client.player(g);
+    let Some(p) = s.client.get_player(g) else {
+        return no_player();
+    };
     act(s.clone(), async move { p.pause(b.paused).await }).await
 }
 async fn resume(
@@ -277,7 +290,9 @@ async fn resume(
     let Some(g) = parse::<u64>(&id).map(GuildId) else {
         return invalid();
     };
-    let p = s.client.player(g);
+    let Some(p) = s.client.get_player(g) else {
+        return no_player();
+    };
     act(s.clone(), async move { p.pause(false).await }).await
 }
 async fn seek(
@@ -291,7 +306,9 @@ async fn seek(
     if b.position_ms > 86_400_000 {
         return invalid();
     }
-    let p = s.client.player(g);
+    let Some(p) = s.client.get_player(g) else {
+        return no_player();
+    };
     act(s.clone(), async move { p.seek(b.position_ms).await }).await
 }
 async fn volume(
@@ -305,7 +322,9 @@ async fn volume(
     if b.volume > 1000 {
         return invalid();
     }
-    let p = s.client.player(g);
+    let Some(p) = s.client.get_player(g) else {
+        return no_player();
+    };
     act(s.clone(), async move { p.set_volume(b.volume).await }).await
 }
 async fn stop(
@@ -315,7 +334,9 @@ async fn stop(
     let Some(g) = parse::<u64>(&id).map(GuildId) else {
         return invalid();
     };
-    let p = s.client.player(g);
+    let Some(p) = s.client.get_player(g) else {
+        return no_player();
+    };
     act(s.clone(), async move { p.stop().await }).await
 }
 async fn leave(
@@ -325,8 +346,8 @@ async fn leave(
     let Some(g) = parse::<u64>(&id).map(GuildId) else {
         return invalid();
     };
-    let p = s.client.player(g);
-    act(s.clone(), async move { p.leave().await }).await
+    let g2 = s.gateway.clone();
+    act(s.clone(), async move { g2.leave(g).await }).await
 }
 fn play_error(error: straight_rs::Error) -> (StatusCode, &'static str, &'static str) {
     if matches!(error, straight_rs::Error::NoNode) {
@@ -357,7 +378,22 @@ pub fn router(state: Arc<WorkerApiState>, auth_state: AuthState) -> Router {
         .route("/v1/guilds/{guild_id}/volume", post(volume))
         .route("/v1/guilds/{guild_id}/stop", post(stop))
         .route("/v1/guilds/{guild_id}/leave", post(leave))
-        .with_state(state)
-        .layer(axum::extract::DefaultBodyLimit::max(limit));
+        .with_state(state.clone())
+        .layer(axum::extract::DefaultBodyLimit::max(limit))
+        .layer(axum::middleware::from_fn_with_state(state, deadline_layer));
     auth::secure(r, auth_state)
+}
+async fn deadline_layer(
+    State(s): State<Arc<WorkerApiState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    match tokio::time::timeout(s.deadline, next.run(req)).await {
+        Ok(response) => response,
+        Err(_) => err(
+            StatusCode::GATEWAY_TIMEOUT,
+            "deadline",
+            "Operation deadline elapsed.",
+        ),
+    }
 }

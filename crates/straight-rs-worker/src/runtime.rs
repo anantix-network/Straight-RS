@@ -42,6 +42,7 @@ impl<D: GatewayDriver> WorkerBuilder<D> {
         let (gateway_tx, mut gateway_rx) = mpsc::channel(256);
         let (gateway_shutdown_tx, gateway_shutdown_rx) = watch::channel(false);
         let proxy = Arc::new(GatewayVoiceProxy::new(commands_tx, gateway_command_timeout));
+        let voice_gateway: Arc<dyn straight_rs::VoiceGateway> = proxy.clone();
         let mut builder = LavalinkClient::builder(bot_user_id).gateway(proxy);
         for node in nodes {
             builder = builder.node(node);
@@ -100,6 +101,7 @@ impl<D: GatewayDriver> WorkerBuilder<D> {
                 lavalink: client,
             },
             voice,
+            voice_gateway,
             api_token,
             per_ip_request_limit,
             limiter_table_capacity,
@@ -119,6 +121,7 @@ pub struct RunningWorker {
     status: StatusState,
     #[allow(dead_code)]
     voice: VoiceStateStore,
+    voice_gateway: Arc<dyn straight_rs::VoiceGateway>,
     api_token: crate::config::SecretString,
     per_ip_request_limit: usize,
     limiter_table_capacity: usize,
@@ -137,6 +140,7 @@ impl RunningWorker {
         let state = Arc::new(crate::api::WorkerApiState {
             client,
             voice: self.voice.clone(),
+            gateway: self.voice_gateway.clone(),
             status: Arc::new(move || status.snapshot()),
             body_limit: self.body_limit,
             deadline: self.callback_timeout,

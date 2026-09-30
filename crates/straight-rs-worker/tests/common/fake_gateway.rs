@@ -82,6 +82,8 @@ pub type VoiceCalls = std::sync::Arc<std::sync::Mutex<Vec<(GuildId, Option<Chann
 #[derive(Clone, Default)]
 pub struct RecordingGateway {
     pub calls: VoiceCalls,
+    /// When set, every recorded command is echoed back as the bot's own voice-state event.
+    pub echo: bool,
 }
 impl GatewayDriver for RecordingGateway {
     fn run<'a>(
@@ -93,6 +95,7 @@ impl GatewayDriver for RecordingGateway {
         mut shutdown: watch::Receiver<bool>,
     ) -> GatewayFuture<'a> {
         let calls = self.calls.clone();
+        let echo = self.echo;
         Box::pin(async move {
             events
                 .send(GatewayEvent::Ready)
@@ -105,6 +108,9 @@ impl GatewayDriver for RecordingGateway {
                   Some(GatewayCommand::SetVoiceState { guild, channel, reply }) => {
                    calls.lock().unwrap().push((guild, channel));
                    let _ = reply.send(Ok(()));
+                   if echo {
+                    events.send(voice_state(guild, channel)).await.map_err(|_| WorkerError::GatewayClosed)?;
+                   }
                   }
                   None => return Ok(()),
                  }

@@ -150,6 +150,7 @@ async fn sanitize(request: Request, next: Next) -> Response {
                 "body_too_large",
                 "Request body exceeds the configured limit.",
             ),
+            StatusCode::GATEWAY_TIMEOUT => ("deadline", "Operation deadline elapsed."),
             _ if status.is_server_error() => {
                 ("internal_error", "The request could not be completed.")
             }

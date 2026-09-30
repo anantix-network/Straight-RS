@@ -32,6 +32,7 @@ twilight-model = { version = "0.17", optional = true }
 tower = "0.5"
 http-body-util.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+futures-util.workspace = true
 
 [[example]]
 name = "worker-serenity"

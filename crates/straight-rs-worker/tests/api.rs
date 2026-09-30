@@ -33,7 +33,14 @@ async fn app_with<D: straight_rs_worker::GatewayDriver>(
     gateway: D,
     lavalink: MockLavalink,
 ) -> Harness {
-    let config = WorkerConfigBuilder::new(
+    app_with_timeout(gateway, lavalink, None).await
+}
+async fn app_with_timeout<D: straight_rs_worker::GatewayDriver>(
+    gateway: D,
+    lavalink: MockLavalink,
+    callback_timeout: Option<std::time::Duration>,
+) -> Harness {
+    let mut config = WorkerConfigBuilder::new(
         UserId(9),
         SecretString::new("synthetic-bot-secret"),
         SecretString::new(TOKEN),
@@ -44,6 +51,9 @@ async fn app_with<D: straight_rs_worker::GatewayDriver>(
     )
     .build()
     .unwrap();
+    if let Some(t) = callback_timeout {
+        config.callback_timeout = t;
+    }
     let worker = WorkerBuilder::new(config, gateway).build().await.unwrap();
     let router = worker.router();
     Harness {
@@ -63,6 +73,31 @@ async fn wait_ready(h: &Harness) {
 }
 fn auth_header() -> String {
     format!("Bearer {TOKEN}")
+}
+/// Joins through the API and waits (bounded) for the bot's own voice-state
+/// event to create the player, so later mutating calls act on a real session.
+async fn join_and_wait(h: &Harness, guild: u64, channel: u64) {
+    let (status, text) = call(
+        h,
+        &format!("/v1/guilds/{guild}/join"),
+        &format!(r#"{{"channel_id":"{channel}"}}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{text}");
+    wait_player(h, guild).await;
+}
+async fn wait_player(h: &Harness, guild: u64) {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let (status, _) = call(h, &format!("/v1/guilds/{guild}/player"), "").await;
+            if status == StatusCode::OK {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("voice session deadline elapsed");
 }
 async fn call(h: &Harness, uri: &str, body: &str) -> (StatusCode, String) {
     let response = h
@@ -285,6 +320,7 @@ async fn readyz_is_503_when_only_lavalink_is_unready_then_200() {
 async fn load_empty_is_404_and_error_is_generic_502() {
     let h = app().await;
     wait_ready(&h).await;
+    join_and_wait(&h, 1, 2).await;
     h.mock
         .set_load_body(serde_json::json!({"loadType":"empty","data":{}}));
     let (status, text) = call(&h, "/v1/guilds/1/play", r#"{"identifier":"x"}"#).await;
@@ -308,6 +344,7 @@ async fn load_empty_is_404_and_error_is_generic_502() {
 async fn track_search_and_playlist_selection_return_204() {
     let h = app().await;
     wait_ready(&h).await;
+    join_and_wait(&h, 1, 2).await;
     let bodies = [
         serde_json::json!({"loadType":"track","data":synthetic_track("enc-track")}),
         serde_json::json!({"loadType":"search","data":[synthetic_track("enc-first"), synthetic_track("enc-second")]}),
@@ -332,12 +369,14 @@ async fn track_search_and_playlist_selection_return_204() {
 
 #[tokio::test]
 async fn stop_never_leaves_voice_but_leave_does() {
-    let gateway = RecordingGateway::default();
+    let gateway = RecordingGateway {
+        echo: true,
+        ..Default::default()
+    };
     let calls = gateway.calls.clone();
     let h = app_with(gateway, MockLavalink::start().await).await;
     wait_ready(&h).await;
-    let (status, text) = call(&h, "/v1/guilds/1/join", r#"{"channel_id":"2"}"#).await;
-    assert_eq!(status, StatusCode::NO_CONTENT, "{text}");
+    join_and_wait(&h, 1, 2).await;
     h.mock
         .set_load_body(serde_json::json!({"loadType":"track","data":synthetic_track("enc")}));
     let (status, text) = call(&h, "/v1/guilds/1/play", r#"{"identifier":"x"}"#).await;
@@ -358,6 +397,7 @@ async fn stop_never_leaves_voice_but_leave_does() {
 async fn player_json_omits_user_data_plugin_info_and_voice_credentials() {
     let h = app().await;
     wait_ready(&h).await;
+    join_and_wait(&h, 1, 2).await;
     h.mock
         .set_load_body(serde_json::json!({"loadType":"track","data":synthetic_track("enc")}));
     let (status, text) = call(&h, "/v1/guilds/1/play", r#"{"identifier":"x"}"#).await;
@@ -400,4 +440,129 @@ async fn unknown_guild_player_is_404_without_creating_state() {
     // A later read is still 404: the GET did not create a player.
     let (status, _) = call(&h, "/v1/guilds/777/player", "").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+fn code_of(text: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(text).unwrap()["error"]["code"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn mutating_routes_on_unknown_guild_are_404_and_create_no_state() {
+    let h = app().await;
+    wait_ready(&h).await;
+    let cases = [
+        ("/v1/guilds/777/pause", r#"{"paused":true}"#),
+        ("/v1/guilds/777/resume", ""),
+        ("/v1/guilds/777/seek", r#"{"position_ms":5}"#),
+        ("/v1/guilds/777/volume", r#"{"volume":50}"#),
+        ("/v1/guilds/777/stop", ""),
+    ];
+    for (uri, body) in cases {
+        let (status, text) = call(&h, uri, body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {text}");
+        assert_eq!(code_of(&text), "not_found", "{uri}: {text}");
+        let (status, text) = call(&h, "/v1/guilds/777/player", "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "after {uri}: {text}");
+    }
+    assert!(
+        !h.mock
+            .requests()
+            .iter()
+            .any(|r| (r.method == "PATCH" || r.method == "DELETE") && r.path.contains("777")),
+        "no player mutation may reach Lavalink"
+    );
+}
+
+#[tokio::test]
+async fn join_and_leave_do_not_create_player_state_until_a_voice_event() {
+    let gateway = RecordingGateway::default();
+    let calls = gateway.calls.clone();
+    let h = app_with(gateway, MockLavalink::start().await).await;
+    wait_ready(&h).await;
+    let (status, text) = call(&h, "/v1/guilds/777/join", r#"{"channel_id":"5"}"#).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{text}");
+    let (status, _) = call(&h, "/v1/guilds/777/player", "").await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "join must not create a player"
+    );
+    let (status, text) = call(&h, "/v1/guilds/777/leave", "").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{text}");
+    let (status, _) = call(&h, "/v1/guilds/777/player", "").await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "leave must not create a player"
+    );
+    let recorded = calls.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 2, "{recorded:?}");
+    assert_eq!(recorded[0].0, straight_rs_model::GuildId(777));
+    assert_eq!(recorded[0].1, Some(straight_rs_model::ChannelId(5)));
+    assert_eq!(recorded[1].0, straight_rs_model::GuildId(777));
+    assert!(recorded[1].1.is_none());
+}
+
+#[tokio::test]
+async fn play_requires_an_active_voice_session_and_skips_load_without_one() {
+    let gateway = ControlledGateway::new(false);
+    let events = gateway.events.clone();
+    let h = app_with(gateway, MockLavalink::start().await).await;
+    wait_ready(&h).await;
+    h.mock
+        .set_load_body(serde_json::json!({"loadType":"track","data":synthetic_track("enc")}));
+    let (status, text) = call(&h, "/v1/guilds/888/play", r#"{"identifier":"x"}"#).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{text}");
+    assert_eq!(code_of(&text), "not_found", "{text}");
+    assert_eq!(h.mock.load_requests(), 0, "load must not run without voice");
+    let (status, _) = call(&h, "/v1/guilds/888/player", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    events
+        .send(common::fake_gateway::voice_state(
+            straight_rs_model::GuildId(888),
+            Some(straight_rs_model::ChannelId(3)),
+        ))
+        .unwrap();
+    wait_player(&h, 888).await;
+    let (status, text) = call(&h, "/v1/guilds/888/play", r#"{"identifier":"x"}"#).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{text}");
+    assert_eq!(h.mock.load_requests(), 1);
+}
+
+#[tokio::test]
+async fn stalled_request_body_hits_the_deadline_with_structured_504() {
+    let h = app_with_timeout(
+        FakeGateway,
+        MockLavalink::start().await,
+        Some(std::time::Duration::from_millis(100)),
+    )
+    .await;
+    wait_ready(&h).await;
+    let stalled = Request::post("/v1/guilds/1/play")
+        .header("content-type", "application/json")
+        .header("authorization", auth_header())
+        .extension(ConnectInfo(
+            "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
+        ))
+        .body(Body::from_stream(futures_util::stream::pending::<
+            Result<axum::body::Bytes, std::convert::Infallible>,
+        >()))
+        .unwrap();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        h.router.clone().oneshot(stalled),
+    )
+    .await
+    .expect("stalled body must be cut off by the API deadline")
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    let text = body_text(response).await;
+    assert_eq!(code_of(&text), "deadline", "{text}");
+    // A normal request under the same config is unaffected.
+    let (status, text) = call(&h, "/v1/guilds/1/player", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{text}");
+    assert_eq!(code_of(&text), "not_found");
 }

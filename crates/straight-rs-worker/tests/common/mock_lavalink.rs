@@ -26,6 +26,7 @@ pub struct MockLavalink {
     ready_release: tokio::sync::watch::Sender<bool>,
     #[allow(dead_code)]
     load_body: Arc<Mutex<Value>>,
+    load_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 pub fn synthetic_track(encoded: &str) -> Value {
@@ -62,6 +63,8 @@ impl MockLavalink {
         let recorded = requests.clone();
         let load_body = Arc::new(Mutex::new(Value::Null));
         let load_handle = load_body.clone();
+        let load_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let load_counter = load_count.clone();
         let app = Router::new().route("/v4/websocket", get(move |upgrade: WebSocketUpgrade| ws_handler(upgrade, ready_rx.clone()))).fallback(move |method: Method, uri: axum::http::Uri, body: Bytes| {
             let recorded = recorded.clone();
             async move {
@@ -76,6 +79,7 @@ impl MockLavalink {
         let app = app.route(
             "/v4/loadtracks",
             get(move || {
+                load_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let body = load_body.lock().unwrap().clone();
                 async move { axum::Json(body) }
             }),
@@ -91,7 +95,12 @@ impl MockLavalink {
             _task: task,
             ready_release,
             load_body: load_handle,
+            load_count,
         }
+    }
+    #[allow(dead_code)]
+    pub fn load_requests(&self) -> usize {
+        self.load_count.load(std::sync::atomic::Ordering::SeqCst)
     }
     #[allow(dead_code)]
     pub fn set_load_body(&self, body: Value) {
