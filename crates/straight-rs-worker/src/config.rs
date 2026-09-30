@@ -39,11 +39,11 @@ impl fmt::Debug for WorkerConfig {
     }
 }
 
-pub struct WorkerBuilder {
+pub struct WorkerConfigBuilder {
     config: WorkerConfig,
 }
 
-impl WorkerBuilder {
+impl WorkerConfigBuilder {
     pub fn new(
         bot_user_id: UserId,
         bot_token: SecretString,
@@ -129,8 +129,8 @@ impl fmt::Debug for SecretString {
 mod tests {
     use super::*;
 
-    fn valid_builder() -> WorkerBuilder {
-        WorkerBuilder::new(
+    fn valid_builder() -> WorkerConfigBuilder {
+        WorkerConfigBuilder::new(
             UserId(1),
             SecretString::new("bot-token"),
             SecretString::new("api-token"),
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn rejects_empty_bot_token() {
-        let builder = WorkerBuilder::new(
+        let builder = WorkerConfigBuilder::new(
             UserId(1),
             SecretString::new(""),
             SecretString::new("api-token"),
@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn rejects_empty_api_token() {
-        let builder = WorkerBuilder::new(
+        let builder = WorkerConfigBuilder::new(
             UserId(1),
             SecretString::new("bot-token"),
             SecretString::new(""),
@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn rejects_empty_nodes() {
-        let builder = WorkerBuilder::new(
+        let builder = WorkerConfigBuilder::new(
             UserId(1),
             SecretString::new("bot-token"),
             SecretString::new("api-token"),
