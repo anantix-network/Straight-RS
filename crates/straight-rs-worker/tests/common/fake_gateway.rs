@@ -7,6 +7,63 @@ use straight_rs_worker::{
 use tokio::sync::{mpsc, oneshot, watch};
 
 pub struct FakeGateway;
+
+#[allow(dead_code)]
+pub struct ControlledGateway {
+    pub events: mpsc::UnboundedSender<GatewayEvent>,
+    receiver: std::sync::Mutex<Option<mpsc::UnboundedReceiver<GatewayEvent>>>,
+    pub stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub fail_on_shutdown: bool,
+}
+#[allow(dead_code)]
+impl ControlledGateway {
+    pub fn new(fail_on_shutdown: bool) -> Self {
+        let (events, receiver) = mpsc::unbounded_channel();
+        Self {
+            events,
+            receiver: std::sync::Mutex::new(Some(receiver)),
+            stopped: std::sync::Arc::default(),
+            fail_on_shutdown,
+        }
+    }
+}
+impl GatewayDriver for ControlledGateway {
+    fn run<'a>(
+        &'a self,
+        _token: SecretString,
+        _bot_user_id: UserId,
+        _commands: mpsc::Receiver<GatewayCommand>,
+        events: mpsc::Sender<GatewayEvent>,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> GatewayFuture<'a> {
+        let mut source = self
+            .receiver
+            .lock()
+            .unwrap()
+            .take()
+            .expect("gateway driver runs once");
+        let stopped = self.stopped.clone();
+        Box::pin(async move {
+            events
+                .send(GatewayEvent::Ready)
+                .await
+                .map_err(|_| WorkerError::GatewayClosed)?;
+            loop {
+                tokio::select! {
+                    _ = shutdown.changed() => {
+                        stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+                        return if self.fail_on_shutdown { Err(WorkerError::Gateway("injected gateway failure".into())) } else { Ok(()) };
+                    },
+                    event = source.recv() => match event {
+                        Some(event) => events.send(event).await.map_err(|_| WorkerError::GatewayClosed)?,
+                        None => return Ok(()),
+                    }
+                }
+            }
+        })
+    }
+}
+
 impl GatewayDriver for FakeGateway {
     fn run<'a>(
         &'a self,

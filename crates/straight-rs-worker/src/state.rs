@@ -55,3 +55,21 @@ impl StatusState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::VoiceStateStore;
+    use straight_rs::{ChannelId, GuildId};
+
+    #[test]
+    fn voice_snapshot_inserts_replaces_and_removes_channels() {
+        let store = VoiceStateStore::default();
+        let guild = GuildId(1);
+        store.update(guild, Some(ChannelId(10)));
+        assert_eq!(store.channel(guild), Some(ChannelId(10)));
+        store.update(guild, Some(ChannelId(20)));
+        assert_eq!(store.channel(guild), Some(ChannelId(20)));
+        store.update(guild, None);
+        assert_eq!(store.channel(guild), None);
+    }
+}
