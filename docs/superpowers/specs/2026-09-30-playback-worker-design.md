@@ -4,7 +4,7 @@ Date: 2026-09-30
 
 ## 1. Goal
 
-Provide a reusable Rust crate/service that keeps the Discord Gateway shard and Lavalink player runtime alive when the command/application process is unavailable. Consumers can add the worker crate to a dedicated, long-running process and send playback commands to it from their bot application.
+Provide a reusable, plugin-extensible Rust crate/service that keeps the Discord Gateway shard and Lavalink player runtime alive when the command/application process is unavailable. Consumers can add the worker crate to a dedicated, long-running process, register Rust plugins, and send playback commands to it from their bot application.
 
 Success means: while the worker process, its Discord Gateway connection, Lavalink node, and Discord voice service remain healthy, stopping/restarting the separate command process does not disconnect an already-playing track. The command process can reconnect and inspect/control the existing player afterward.
 
@@ -65,14 +65,24 @@ Use bounded request bodies, request deadlines, structured error responses, and g
 - Worker or Gateway-owner termination is outside the uninterrupted-playback guarantee. On worker shutdown, do not silently send a leave/destroy as cleanup; surface the limitation clearly and allow configured graceful shutdown behavior to be explicit.
 - Durable recovery across worker host/process loss is not part of this version. Do not persist Discord voice tokens or session credentials to disk.
 
-## 7. Security and operations
+## 7. Plugin system
+
+- Define a public `WorkerPlugin: Send + Sync + 'static` trait and register implementations through the worker builder before startup. Plugins are statically linked Rust code pulled in as Cargo dependencies; do not load dynamic libraries or execute downloaded/untrusted plugin code.
+- Provide lifecycle hooks (`on_start`, `on_event`, `on_shutdown`) and a cloneable `WorkerContext` for safe playback queries/commands. Event hooks cover player track lifecycle and node/worker health; plugins can implement features such as queue continuation, metrics, and application-specific policy without forking the worker.
+- Keep the core worker/API independent of plugin implementations. Plugins cannot replace authentication, bind listeners, or intercept authorization in this version; custom HTTP route registration is out of scope.
+- Run plugin callbacks outside Discord/Lavalink event-processing tasks. Give each plugin bounded event capacity, finite callback deadlines, explicit lag/error reporting, and independent supervision. A panicking or failing plugin must not stop the worker or another plugin. Never spawn unbounded tasks to catch up.
+- Plugins are trusted in-process code and share the worker's privileges and credentials; document this security boundary. Credentials and raw voice tokens are never exposed through `WorkerContext` or plugin events.
+- Startup-hook failure follows explicit policy: required plugins fail worker startup; optional plugins are marked unhealthy and skipped. Shutdown is bounded and runs hooks in reverse registration order.
+- No plugin persistence is supplied by the core. A plugin that needs durable state owns its storage and must not persist Discord voice/session tokens.
+
+## 8. Security and operations
 
 - Read Discord/Lavalink credentials from environment or the user's secret manager; never log tokens, Authorization headers, or full voice credentials.
 - Default control listener is `127.0.0.1`; require bearer authentication for all routes. Reject invalid/oversized input and rate-limit control requests.
 - Provide graceful shutdown signals, health/readiness, structured tracing, and operator guidance for process supervision and single-shard ownership.
 - Document expected topology, known single points of failure, and that horizontal replicas must not own the same Discord shard concurrently.
 
-## 8. Testing and acceptance criteria
+## 9. Testing and acceptance criteria
 
 1. Workspace relocation preserves package names and all existing tests/examples; `cargo metadata --no-deps` resolves every member under `crates/`.
 2. Unit tests prove API validation, authentication, bounded request handling, and error mapping without live Discord/Lavalink credentials.
@@ -80,10 +90,11 @@ Use bounded request bodies, request deadlines, structured error responses, and g
 4. A process-level test runs the worker separately from a mock command client, starts playback, terminates/restarts only the command client, and verifies the worker/player remains active and queryable.
 5. Tests explicitly distinguish command-process failure (playback remains active) from worker/Gateway-shard failure (uninterrupted playback is not promised).
 6. Verify with workspace tests, formatting, Clippy, and example build; add a documented manual smoke test using a test Discord bot and Lavalink instance.
+7. Plugin tests prove deterministic registration/startup/shutdown order, event delivery, bounded-queue lag reporting, timeout and panic isolation, and that a failing plugin does not interrupt playback or other plugins.
 
-## 9. Non-goals
+## 10. Non-goals
 
 - Keeping audio alive after the worker's own Discord Gateway shard or process dies.
 - Replacing Lavalink or implementing Discord voice audio transport in Straight-RS.
-- Queue/autoplay persistence, database-backed state, multi-tenant authorization, or public Internet exposure without TLS/reverse proxy.
+- Bundled queue/autoplay implementation, database-backed state, multi-tenant authorization, or public Internet exposure without TLS/reverse proxy. Queue continuation remains possible as a separately registered plugin.
 - Running multiple active worker owners for the same Discord shard.
