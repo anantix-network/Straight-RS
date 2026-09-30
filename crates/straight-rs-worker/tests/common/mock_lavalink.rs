@@ -24,6 +24,17 @@ pub struct MockLavalink {
     requests: Arc<Mutex<Vec<Recorded>>>,
     _task: tokio::task::JoinHandle<()>,
     ready_release: tokio::sync::watch::Sender<bool>,
+    #[allow(dead_code)]
+    load_body: Arc<Mutex<Value>>,
+}
+
+pub fn synthetic_track(encoded: &str) -> Value {
+    serde_json::json!({
+        "encoded": encoded,
+        "info": {"identifier": "id1", "isSeekable": true, "author": "a", "length": 1000, "isStream": false, "position": 0, "title": "t", "uri": "https://example.test/t", "artworkUrl": null, "isrc": null, "sourceName": "test"},
+        "pluginInfo": {"pluginSecret": "synthetic-plugin-secret"},
+        "userData": {"userSecret": "synthetic-user-secret"}
+    })
 }
 impl MockLavalink {
     pub async fn start() -> Self {
@@ -49,14 +60,26 @@ impl MockLavalink {
         let (ready_release, ready_rx) = tokio::sync::watch::channel(!paused);
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = requests.clone();
+        let load_body = Arc::new(Mutex::new(Value::Null));
+        let load_handle = load_body.clone();
         let app = Router::new().route("/v4/websocket", get(move |upgrade: WebSocketUpgrade| ws_handler(upgrade, ready_rx.clone()))).fallback(move |method: Method, uri: axum::http::Uri, body: Bytes| {
             let recorded = recorded.clone();
             async move {
                 let value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                recorded.lock().unwrap().push(Recorded { method: method.to_string(), path: uri.path().to_owned(), body: value });
-                if method == Method::PATCH { axum::Json(serde_json::json!({"guildId": "1", "track": null, "volume": 100, "paused": false, "state": {"time": 0, "position": 0, "connected": true, "ping": 1}, "voice": {"token": "", "endpoint": "", "sessionId": ""}, "filters": {}})).into_response() } else { StatusCode::NO_CONTENT.into_response() }
+                recorded.lock().unwrap().push(Recorded { method: method.to_string(), path: uri.path().to_owned(), body: value.clone() });
+                if method == Method::PATCH {
+                    let track = value["track"]["encoded"].as_str().map(synthetic_track);
+                    axum::Json(serde_json::json!({"guildId": "1", "track": track, "volume": 100, "paused": false, "state": {"time": 0, "position": 0, "connected": true, "ping": 1}, "voice": {"token": "synthetic-voice-token", "endpoint": "synthetic-voice-endpoint.example:443", "sessionId": "synthetic-voice-session"}, "filters": {}})).into_response()
+                } else { StatusCode::NO_CONTENT.into_response() }
             }
         });
+        let app = app.route(
+            "/v4/loadtracks",
+            get(move || {
+                let body = load_body.lock().unwrap().clone();
+                async move { axum::Json(body) }
+            }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
@@ -67,7 +90,12 @@ impl MockLavalink {
             requests,
             _task: task,
             ready_release,
+            load_body: load_handle,
         }
+    }
+    #[allow(dead_code)]
+    pub fn set_load_body(&self, body: Value) {
+        *self.load_body.lock().unwrap() = body;
     }
     pub fn release_ready(&self) -> tokio::sync::watch::Sender<bool> {
         self.ready_release.clone()

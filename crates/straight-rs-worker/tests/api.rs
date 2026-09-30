@@ -15,16 +15,24 @@ mod common {
     #[path = "../common/mock_lavalink.rs"]
     pub mod mock_lavalink;
 }
-use common::{fake_gateway::FakeGateway, mock_lavalink::MockLavalink};
+use common::{
+    fake_gateway::{ControlledGateway, FakeGateway, RecordingGateway},
+    mock_lavalink::{MockLavalink, synthetic_track},
+};
 
 const TOKEN: &str = "synthetic-test-api-token-32-bytes-long";
 struct Harness {
     router: axum::Router,
-    _worker: straight_rs_worker::RunningWorker,
-    _mock: MockLavalink,
+    worker: straight_rs_worker::RunningWorker,
+    mock: MockLavalink,
 }
 async fn app() -> Harness {
-    let lavalink = MockLavalink::start().await;
+    app_with(FakeGateway, MockLavalink::start().await).await
+}
+async fn app_with<D: straight_rs_worker::GatewayDriver>(
+    gateway: D,
+    lavalink: MockLavalink,
+) -> Harness {
     let config = WorkerConfigBuilder::new(
         UserId(9),
         SecretString::new("synthetic-bot-secret"),
@@ -36,24 +44,45 @@ async fn app() -> Harness {
     )
     .build()
     .unwrap();
-    let worker = WorkerBuilder::new(config, FakeGateway)
-        .build()
-        .await
-        .unwrap();
+    let worker = WorkerBuilder::new(config, gateway).build().await.unwrap();
     let router = worker.router();
     Harness {
         router,
-        _worker: worker,
-        _mock: lavalink,
+        worker,
+        mock: lavalink,
     }
 }
+async fn wait_ready(h: &Harness) {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !h.worker.status().ready {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("readiness deadline elapsed");
+}
+fn auth_header() -> String {
+    format!("Bearer {TOKEN}")
+}
+async fn call(h: &Harness, uri: &str, body: &str) -> (StatusCode, String) {
+    let response = h
+        .router
+        .clone()
+        .oneshot(request(uri, Some(&auth_header()), body))
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, body_text(response).await)
+}
 fn request(uri: &str, auth: Option<&str>, body: &str) -> Request<Body> {
-    let mut builder = if uri == "/healthz" || uri == "/not-found" || uri.ends_with("/player") {
-        Request::get(uri)
-    } else {
-        Request::post(uri)
-    }
-    .header("content-type", "application/json");
+    let mut builder =
+        if uri == "/healthz" || uri == "/readyz" || uri == "/not-found" || uri.ends_with("/player")
+        {
+            Request::get(uri)
+        } else {
+            Request::post(uri)
+        }
+        .header("content-type", "application/json");
     if let Some(value) = auth {
         builder = builder.header("authorization", value);
     }
@@ -198,4 +227,177 @@ async fn auth_error_body_and_debug_omit_the_synthetic_api_token() {
         },
     );
     assert!(!format!("{auth:?}").contains(TOKEN));
+}
+
+#[tokio::test]
+async fn readyz_is_503_when_only_gateway_is_unready_then_200() {
+    let gateway = ControlledGateway::withheld_ready();
+    let ready = gateway.ready.clone();
+    let h = app_with(gateway, MockLavalink::start().await).await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !h.worker.status().lavalink_ready {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!h.worker.status().gateway_ready);
+    let (status, text) = call(&h, "/readyz", "").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{text}");
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        json["error"]["code"].is_string() && json["error"]["message"].is_string(),
+        "{text}"
+    );
+    ready.send(straight_rs_worker::GatewayEvent::Ready).unwrap();
+    wait_ready(&h).await;
+    let (status, _) = call(&h, "/readyz", "").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn readyz_is_503_when_only_lavalink_is_unready_then_200() {
+    let mock = MockLavalink::start_paused().await;
+    let release = mock.release_ready();
+    let h = app_with(FakeGateway, mock).await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while !h.worker.status().gateway_ready {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!h.worker.status().lavalink_ready);
+    let (status, text) = call(&h, "/readyz", "").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{text}");
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        json["error"]["code"].is_string() && json["error"]["message"].is_string(),
+        "{text}"
+    );
+    release.send(true).unwrap();
+    wait_ready(&h).await;
+    let (status, _) = call(&h, "/readyz", "").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn load_empty_is_404_and_error_is_generic_502() {
+    let h = app().await;
+    wait_ready(&h).await;
+    h.mock
+        .set_load_body(serde_json::json!({"loadType":"empty","data":{}}));
+    let (status, text) = call(&h, "/v1/guilds/1/play", r#"{"identifier":"x"}"#).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{text}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&text).unwrap()["error"]["code"],
+        "not_found"
+    );
+    h.mock.set_load_body(serde_json::json!({"loadType":"error","data":{"message":"synthetic-provider-secret","severity":"fault","cause":"c"}}));
+    let (status, text) = call(&h, "/v1/guilds/1/play", r#"{"identifier":"x"}"#).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{text}");
+    assert!(!text.contains("synthetic"), "{text}");
+    assert!(!text.contains("provider"), "{text}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&text).unwrap()["error"]["code"],
+        "internal_error"
+    );
+}
+
+#[tokio::test]
+async fn track_search_and_playlist_selection_return_204() {
+    let h = app().await;
+    wait_ready(&h).await;
+    let bodies = [
+        serde_json::json!({"loadType":"track","data":synthetic_track("enc-track")}),
+        serde_json::json!({"loadType":"search","data":[synthetic_track("enc-first"), synthetic_track("enc-second")]}),
+        serde_json::json!({"loadType":"playlist","data":{"info":{"name":"p","selectedTrack":1},"pluginInfo":{},"tracks":[synthetic_track("enc-a"), synthetic_track("enc-b")]}}),
+        serde_json::json!({"loadType":"playlist","data":{"info":{"name":"p","selectedTrack":-1},"pluginInfo":{},"tracks":[synthetic_track("enc-c"), synthetic_track("enc-d")]}}),
+    ];
+    let expected = ["enc-track", "enc-first", "enc-b", "enc-c"];
+    for (body, want) in bodies.into_iter().zip(expected) {
+        h.mock.set_load_body(body);
+        let (status, text) = call(&h, "/v1/guilds/1/play", r#"{"identifier":"x"}"#).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{text}");
+        let last = h
+            .mock
+            .requests()
+            .into_iter()
+            .rev()
+            .find(|r| r.method == "PATCH")
+            .unwrap();
+        assert_eq!(last.body["track"]["encoded"], want);
+    }
+}
+
+#[tokio::test]
+async fn stop_never_leaves_voice_but_leave_does() {
+    let gateway = RecordingGateway::default();
+    let calls = gateway.calls.clone();
+    let h = app_with(gateway, MockLavalink::start().await).await;
+    wait_ready(&h).await;
+    let (status, text) = call(&h, "/v1/guilds/1/join", r#"{"channel_id":"2"}"#).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{text}");
+    h.mock
+        .set_load_body(serde_json::json!({"loadType":"track","data":synthetic_track("enc")}));
+    let (status, text) = call(&h, "/v1/guilds/1/play", r#"{"identifier":"x"}"#).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{text}");
+    let (status, text) = call(&h, "/v1/guilds/1/stop", "").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{text}");
+    assert_eq!(calls.lock().unwrap().len(), 1, "stop must not touch voice");
+    assert!(calls.lock().unwrap()[0].1.is_some());
+    assert!(!h.mock.requests().iter().any(|r| r.method == "DELETE"));
+    let (status, text) = call(&h, "/v1/guilds/1/leave", "").await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{text}");
+    let recorded = calls.lock().unwrap().clone();
+    assert_eq!(recorded.len(), 2);
+    assert!(recorded[1].1.is_none());
+}
+
+#[tokio::test]
+async fn player_json_omits_user_data_plugin_info_and_voice_credentials() {
+    let h = app().await;
+    wait_ready(&h).await;
+    h.mock
+        .set_load_body(serde_json::json!({"loadType":"track","data":synthetic_track("enc")}));
+    let (status, text) = call(&h, "/v1/guilds/1/play", r#"{"identifier":"x"}"#).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{text}");
+    let (status, text) = call(&h, "/v1/guilds/1/player", "").await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["track"]["identifier"], "id1", "{text}");
+    for forbidden in [
+        "userData",
+        "pluginInfo",
+        "synthetic-user-secret",
+        "synthetic-plugin-secret",
+        "synthetic-voice",
+        "token",
+        "sessionId",
+        "endpoint",
+        "synthetic-bot-secret",
+        "synthetic-lavalink-secret",
+        TOKEN,
+    ] {
+        assert!(!text.contains(forbidden), "{forbidden} leaked: {text}");
+    }
+}
+
+#[tokio::test]
+async fn unknown_guild_player_is_404_without_creating_state() {
+    let h = app().await;
+    wait_ready(&h).await;
+    let before = h.mock.requests().len();
+    for _ in 0..2 {
+        let (status, text) = call(&h, "/v1/guilds/777/player", "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{text}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).unwrap()["error"]["code"],
+            "not_found"
+        );
+    }
+    assert_eq!(h.mock.requests().len(), before, "no Lavalink traffic");
+    // A later read is still 404: the GET did not create a player.
+    let (status, _) = call(&h, "/v1/guilds/777/player", "").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

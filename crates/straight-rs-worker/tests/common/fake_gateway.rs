@@ -77,6 +77,43 @@ impl GatewayDriver for ControlledGateway {
     }
 }
 
+pub type VoiceCalls = std::sync::Arc<std::sync::Mutex<Vec<(GuildId, Option<ChannelId>)>>>;
+#[allow(dead_code)]
+#[derive(Clone, Default)]
+pub struct RecordingGateway {
+    pub calls: VoiceCalls,
+}
+impl GatewayDriver for RecordingGateway {
+    fn run<'a>(
+        &'a self,
+        _token: SecretString,
+        _bot_user_id: UserId,
+        mut commands: mpsc::Receiver<GatewayCommand>,
+        events: mpsc::Sender<GatewayEvent>,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> GatewayFuture<'a> {
+        let calls = self.calls.clone();
+        Box::pin(async move {
+            events
+                .send(GatewayEvent::Ready)
+                .await
+                .map_err(|_| WorkerError::GatewayClosed)?;
+            loop {
+                tokio::select! {
+                 _ = shutdown.changed() => return Ok(()),
+                 command = commands.recv() => match command {
+                  Some(GatewayCommand::SetVoiceState { guild, channel, reply }) => {
+                   calls.lock().unwrap().push((guild, channel));
+                   let _ = reply.send(Ok(()));
+                  }
+                  None => return Ok(()),
+                 }
+                }
+            }
+        })
+    }
+}
+
 impl GatewayDriver for FakeGateway {
     fn run<'a>(
         &'a self,
