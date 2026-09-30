@@ -1,0 +1,47 @@
+[package]
+name = "larplink"
+description = "High-performance Lavalink v4 client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+tls = ["dep:hyper-rustls", "dep:rustls", "tokio-tungstenite/rustls-tls-webpki-roots"]
+serenity = ["dep:serenity"]
+twilight = ["dep:twilight-model"]
+songbird = ["dep:songbird"]
+e2e = []
+
+[dependencies]
+larplink-model.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+dashmap.workspace = true
+arc-swap.workspace = true
+percent-encoding.workspace = true
+rand.workspace = true
+hyper-rustls = { version = "0.27", optional = true, default-features = false, features = ["http1", "ring", "webpki-tokio"] }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
+serenity = { version = "0.12", optional = true, default-features = false, features = ["model"] }
+twilight-model = { version = "0.16", optional = true }
+songbird = { version = "0.4", optional = true, default-features = false }
+
+[dev-dependencies]
+axum = { version = "0.7", features = ["ws"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+criterion = "0.5"
+
+[[bench]]
+name = "core"
+harness = false
