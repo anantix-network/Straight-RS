@@ -61,10 +61,24 @@ client:
   and pass it to `ClientBuilder::gateway` if you want larplink to join and leave
   channels for you.
 
+## Players
+
+`client.player(guild)` returns a cheap, cloneable `Player` handle. Writes
+(`play`, `pause`, `seek`, `set_volume`, `set_filters`, `update`, ...) for one
+guild are sent one at a time, in call order. The synchronous getters
+(`position`, `track`, `is_paused`, `volume`, `filters`) read the locally cached
+state and never await; `snapshot()` returns the whole `PlayerSnapshot`, whose
+`filters` field is an `Arc<Filters>` (shared, not copied on every update).
+`player.fetch().await` asks the node for its current view of the player
+(`GET /v4/sessions/{id}/players/{guild}`). `destroy()` deletes the player on its
+node and forgets it locally; it completes even if the awaiting future is
+dropped, and if the node is unreachable the player is deleted when the node
+comes back with the same session.
+
 ## Events
 
 `client.events()` returns a `tokio::sync::broadcast::Receiver<Event>` covering all
-nodes (`NodeConnected`, `Ready`, `Stats`, `PlayerUpdate`, `TrackStart`, `TrackEnd`,
+nodes (`NodeConnected`, `NodeDisconnected`, `Ready`, `Stats`, `PlayerUpdate`, `TrackStart`, `TrackEnd`,
 `TrackException`, `TrackStuck`, `WebSocketClosed`, `PlayerMigrated`, and
 `Unknown` for plugin messages). `player.events()` yields the same stream filtered
 to one guild. The channel is bounded (`ClientBuilder::event_capacity`); a slow
@@ -80,7 +94,25 @@ backoff. If the session is resumed, players carry on. If the server reports
 volume, voice state) on the new session. If a node stays down, its players are
 migrated to another node according to the balancing strategy, announced by
 `Event::PlayerMigrated { guild, from, to }`; players with no node available are
-kept and rescued when a node returns.
+kept and rescued when a node returns. A write to a player whose node is down (or
+that could not be migrated) moves it to a healthy node right away. Voice state
+that could not be delivered (no node ready, failed request) is kept and sent
+with the next write. Players moved away from a node are deleted there if that
+node comes back with its old session.
+
+## Configuration and shutdown
+
+`ClientBuilder::build` validates the configuration and returns `Error::Config`
+for settings that could never work: no nodes, `event_capacity` outside
+`1..=MAX_EVENT_CAPACITY` (2^24), a zero `ping_interval`, `ping_timeout` shorter
+than `ping_interval`, `secure = true` without the `tls` feature, or a host,
+password or client name that is not a valid header value.
+
+`client.shutdown()` (or dropping the last clone of the client) closes every node
+connection and cancels pending failover and restore work. Nodes then report
+`NodeStatus::Disconnected`, and every call on the client or on any `Player`
+handle returns `Error::Closed`. Players are not destroyed on the server; Lavalink
+drops them when the session's resume timeout expires.
 
 ## Out of scope
 
@@ -101,6 +133,7 @@ development machine):
 | pick over 16 nodes (`LeastPenalty`) | ~14.6 ns |
 | position `interpolate` | ~1.9 ns |
 | `PlayerSnapshot::position_now` | ~18 ns |
+| apply a `playerUpdate` to a player (`apply_update`) | ~202 ns |
 
 Numbers vary by machine; rerun the benches to compare on yours.
 
