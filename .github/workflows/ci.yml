@@ -13,13 +13,13 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
-      - run: cargo test -p larplink --all-features
-      - run: cargo test -p larplink --features twilight
-      - run: cargo test -p larplink --features serenity
-      - run: cargo test -p larplink --features songbird
-      - run: cargo check -p larplink --features tls
-      - run: cargo build -p larplink --examples
-      - run: cargo bench -p larplink --no-run
+      - run: cargo test -p straight-rs --all-features
+      - run: cargo test -p straight-rs --features twilight
+      - run: cargo test -p straight-rs --features serenity
+      - run: cargo test -p straight-rs --features songbird
+      - run: cargo check -p straight-rs --features tls
+      - run: cargo build -p straight-rs --examples
+      - run: cargo bench -p straight-rs --no-run
   msrv:
     runs-on: ubuntu-latest
     steps:

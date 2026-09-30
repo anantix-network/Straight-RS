@@ -1,20 +1,20 @@
-# larplink
+# Straight-RS
 
 A fast, complete [Lavalink v4](https://lavalink.dev) client for Rust. It is
 library-agnostic: it talks to Lavalink over REST and WebSocket and never depends
 on a particular Discord library. Optional adapters convert serenity, twilight and
-songbird voice types into larplink's inputs.
+songbird voice types into Straight-RS's inputs.
 
-Workspace crates: `larplink` (the client) and `larplink-model` (all protocol
-payloads, re-exported as `larplink::model`).
+Workspace crates: `straight-rs` (the client) and `straight-rs-model` (all protocol
+payloads, re-exported as `straight_rs::model`).
 
 ## Install
 
 ```toml
 [dependencies]
-larplink = "0.1"
+straight-rs = "0.1"
 # optional features: serenity | twilight | songbird | tls
-# larplink = { version = "0.1", features = ["twilight"] }
+# straight-rs = { version = "0.1", features = ["twilight"] }
 ```
 
 `tls` enables `wss://`/`https://` nodes (rustls). The MSRV is Rust 1.80.
@@ -22,8 +22,8 @@ larplink = "0.1"
 ## Quick start
 
 The full, compile-checked version lives in
-[`larplink/examples/quickstart.rs`](larplink/examples/quickstart.rs)
-(`cargo build -p larplink --examples`).
+[`straight-rs/examples/quickstart.rs`](straight-rs/examples/quickstart.rs)
+(`cargo build -p straight-rs --examples`).
 
 ```rust
 let client = LavalinkClient::builder(UserId(bot_id))
@@ -51,14 +51,14 @@ client:
 
 - Forward the bot's own `VOICE_STATE_UPDATE` to `client.voice_state_update(guild, VoiceStateUpdate { .. })`
   and `VOICE_SERVER_UPDATE` to `client.voice_server_update(guild, VoiceServerUpdate { .. })`.
-  The two can arrive in either order; larplink sends the assembled voice state to
+  The two can arrive in either order; Straight-RS sends the assembled voice state to
   the node once both halves are present. A `None` channel means the bot left; a
   `None` endpoint means Discord's voice server is unavailable.
 - With songbird, pass its connection info to `client.voice_update(guild, VoiceState)`.
-- The `serenity`, `twilight` and `songbird` features add `larplink::adapters::*`
+- The `serenity`, `twilight` and `songbird` features add `straight_rs::adapters::*`
   helpers that convert those libraries' types into the inputs above.
 - Implement the `VoiceGateway` trait (`join` / `leave`, which send gateway opcode 4)
-  and pass it to `ClientBuilder::gateway` if you want larplink to join and leave
+  and pass it to `ClientBuilder::gateway` if you want Straight-RS to join and leave
   channels for you.
 
 ## Players
@@ -90,7 +90,7 @@ and can keep receiving afterwards.
 Each node enables Lavalink session resuming with a grace period
 (`NodeConfig::resume_timeout_secs`, default 60 s) and reconnects with exponential
 backoff. If the session is resumed, players carry on. If the server reports
-`resumed = false`, larplink rebuilds every player (track, position, filters,
+`resumed = false`, Straight-RS rebuilds every player (track, position, filters,
 volume, voice state) on the new session. If a node stays down, its players are
 migrated to another node according to the balancing strategy, announced by
 `Event::PlayerMigrated { guild, from, to }`; players with no node available are
@@ -123,7 +123,7 @@ drops them when the session's resume timeout expires.
 
 ## Performance
 
-`cargo bench -p larplink` (criterion, release profile, one run on the
+`cargo bench -p straight-rs` (criterion, release profile, one run on the
 development machine):
 
 | Benchmark | Time |
@@ -144,7 +144,7 @@ mock Lavalink. An opt-in suite against a real server:
 
 ```sh
 docker run -p 2333:2333 -e SERVER_PORT=2333 ghcr.io/lavalink-devs/lavalink:4
-cargo test -p larplink --features e2e -- --ignored
+cargo test -p straight-rs --features e2e -- --ignored
 ```
 
 ## License

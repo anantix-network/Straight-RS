@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["larplink-model", "larplink"]
+members = ["straight-rs-model", "straight-rs"]
 
 [workspace.package]
 version = "0.1.0"
@@ -24,4 +24,4 @@ dashmap = "6"
 arc-swap = "1"
 percent-encoding = "2"
 rand = "0.8"
-larplink-model = { path = "larplink-model", version = "0.1.0" }
+straight-rs-model = { path = "straight-rs-model", version = "0.1.0" }
