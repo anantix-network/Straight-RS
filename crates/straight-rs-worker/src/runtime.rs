@@ -89,7 +89,7 @@ impl<D: GatewayDriver> WorkerBuilder<D> {
             .await
             .map_err(|e| WorkerError::Gateway(e.to_string()))?;
         let gateway = Arc::new(self.gateway);
-        let gateway_task = tokio::spawn(async move {
+        let mut gateway_task = tokio::spawn(async move {
             gateway
                 .run(
                     bot_token,
@@ -101,6 +101,46 @@ impl<D: GatewayDriver> WorkerBuilder<D> {
                 .await
         });
         let gateway_ready = Arc::new(AtomicBool::new(false));
+        let startup = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                tokio::select! {
+                    event = gateway_rx.recv() => match event {
+                        Some(GatewayEvent::Ready) => return Ok(()),
+                        Some(GatewayEvent::Disconnected) => return Err(WorkerError::Gateway("Gateway disconnected before becoming ready".into())),
+                        Some(_) => {},
+                        None => return Err(WorkerError::Gateway("Gateway event stream closed before becoming ready".into())),
+                    },
+                    result = &mut gateway_task => {
+                        return match result {
+                            Ok(Ok(())) => Err(WorkerError::Gateway("Gateway stopped before becoming ready".into())),
+                            Ok(Err(error)) => Err(error),
+                            Err(error) => Err(WorkerError::Gateway(error.to_string())),
+                        };
+                    }
+                }
+            }
+        }).await;
+        let startup_error = match startup {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error),
+            Err(_) => Some(WorkerError::Gateway(
+                "Gateway startup readiness deadline elapsed".into(),
+            )),
+        };
+        if let Some(error) = startup_error {
+            let _ = gateway_shutdown_tx.send(true);
+            client.shutdown();
+            if !gateway_task.is_finished()
+                && tokio::time::timeout(shutdown_timeout, &mut gateway_task)
+                    .await
+                    .is_err()
+            {
+                gateway_task.abort();
+                let _ = gateway_task.await;
+            }
+            return Err(error);
+        }
+        gateway_ready.store(true, Ordering::Release);
         let degraded = Arc::new(AtomicBool::new(false));
         let lagged = Arc::new(AtomicU64::new(0));
         let voice = VoiceStateStore::default();
