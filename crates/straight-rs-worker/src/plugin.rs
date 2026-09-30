@@ -12,11 +12,20 @@
 //! A timed-out callback is `abort()`ed, but a callback that blocks its thread without
 //! yielding cannot be interrupted by the runtime.
 //!
-//! A plugin never receives raw Discord/Lavalink credentials, voice tokens, `user_data` or
-//! Lavalink plugin metadata: it only sees the whitelisted [`WorkerEvent`]s and a
-//! [`WorkerContext`] that exposes playback and status only. Errors returned from
-//! `on_event` are discarded; errors from `on_start` fail a required plugin's startup.
-//! Error text and panic payloads are never exposed via `/healthz`.
+//! What a plugin can reach: the whitelisted [`WorkerEvent`]s (tracks are sanitized
+//! [`PluginTrack`]s without `user_data` or Lavalink plugin metadata) and a
+//! [`WorkerContext`]. `WorkerContext::player` returns a [`PluginPlayer`], a fixed
+//! allowlist of playback controls that exposes no voice state, voice token, endpoint,
+//! session id, raw `Player` or `LavalinkClient`. `WorkerContext::load` returns the node's
+//! `LoadResult` as-is, so its tracks *do* carry `plugin_info`/`user_data` as supplied by
+//! Lavalink. Errors from `PluginPlayer` and `load` carry only a static category (no REST
+//! path, session id or provider text). Errors returned from `on_event` are discarded;
+//! errors from `on_start` fail a required plugin's startup. Error text and panic payloads
+//! are never exposed via `/healthz`.
+//!
+//! Plugins remain trusted in-process code (they can spawn tasks, read the process
+//! environment and open sockets): `PluginPlayer` narrows the *API* handed to them, it is
+//! not a sandbox.
 
 use crate::{
     error::{WorkerError, WorkerResult},
@@ -31,7 +40,9 @@ use std::{
     },
     time::Duration,
 };
-use straight_rs::{Event, GuildId, LavalinkClient, LoadResult, Player, Track};
+use straight_rs::{
+    Event, GuildId, LavalinkClient, LoadResult, Player, Track, UpdatePlayer, UpdateTrack,
+};
 use tokio::{
     sync::{mpsc, watch},
     task::JoinHandle,
@@ -174,10 +185,13 @@ impl WorkerContext {
     pub(crate) fn new(client: LavalinkClient, status: watch::Receiver<WorkerStatus>) -> Self {
         Self { client, status }
     }
-    /// Get-or-create the player for a guild (plugins are trusted in-process code).
-    pub fn player(&self, guild: GuildId) -> Player {
-        self.client.player(guild)
+    /// Get-or-create the allowlisted player handle for a guild.
+    pub fn player(&self, guild: GuildId) -> PluginPlayer {
+        PluginPlayer {
+            inner: self.client.player(guild),
+        }
     }
+    /// Resolve `identifier` on a node. Errors carry only a static category.
     pub async fn load(&self, identifier: &str) -> WorkerResult<LoadResult> {
         self.client
             .load(identifier)
@@ -189,8 +203,96 @@ impl WorkerContext {
     }
 }
 
+/// Allowlisted playback handle for one guild.
+///
+/// It wraps the client's `Player` privately and exposes only: `guild_id`, `position`,
+/// `is_paused`, `volume`, `track` (sanitized), `play_encoded`, `stop`, `pause`, `seek`
+/// and `set_volume`. There is deliberately no way to reach the voice state
+/// (token/endpoint/session id), filters, events, raw updates, or to
+/// destroy/join/leave. Errors carry only a static category string.
+///
+/// ```compile_fail,E0599
+/// fn leak(player: straight_rs_worker::PluginPlayer) {
+///     let _ = player.fetch();
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// fn raw(player: straight_rs_worker::PluginPlayer) {
+///     let _ = player.update(Default::default());
+/// }
+/// ```
+///
+/// ```
+/// fn ok(player: straight_rs_worker::PluginPlayer) -> u16 {
+///     player.volume()
+/// }
+/// ```
+#[derive(Clone)]
+pub struct PluginPlayer {
+    inner: Player,
+}
+impl fmt::Debug for PluginPlayer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PluginPlayer")
+            .field("guild", &self.inner.guild_id())
+            .finish()
+    }
+}
+impl PluginPlayer {
+    pub fn guild_id(&self) -> GuildId {
+        self.inner.guild_id()
+    }
+    pub fn position(&self) -> u64 {
+        self.inner.position()
+    }
+    pub fn is_paused(&self) -> bool {
+        self.inner.is_paused()
+    }
+    pub fn volume(&self) -> u16 {
+        self.inner.volume()
+    }
+    /// The current track, without `user_data` or plugin metadata.
+    pub fn track(&self) -> Option<PluginTrack> {
+        self.inner.track().as_deref().map(PluginTrack::from)
+    }
+    /// Start `encoded` unless a track is already playing (`noReplace=true`).
+    pub async fn play_encoded(&self, encoded: &str) -> WorkerResult<()> {
+        let update = UpdatePlayer {
+            track: Some(UpdateTrack {
+                encoded: Some(Some(encoded.into())),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        self.inner
+            .update_with(update, true)
+            .await
+            .map_err(WorkerError::from)
+    }
+    pub async fn stop(&self) -> WorkerResult<()> {
+        self.inner.stop().await.map_err(WorkerError::from)
+    }
+    pub async fn pause(&self, paused: bool) -> WorkerResult<()> {
+        self.inner.pause(paused).await.map_err(WorkerError::from)
+    }
+    pub async fn seek(&self, position_ms: u64) -> WorkerResult<()> {
+        self.inner
+            .seek(position_ms)
+            .await
+            .map_err(WorkerError::from)
+    }
+    pub async fn set_volume(&self, volume: u16) -> WorkerResult<()> {
+        self.inner
+            .set_volume(volume)
+            .await
+            .map_err(WorkerError::from)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum PluginStatus {
     Healthy,
     Lagged,
@@ -218,8 +320,12 @@ pub(crate) struct PluginSlot {
     dropped: AtomicU64,
 }
 impl PluginSlot {
-    fn mark_unhealthy(&self) {
-        self.status.store(UNHEALTHY, Ordering::Release);
+    fn mark_unhealthy(&self, reason: &'static str) {
+        let previous = self.status.swap(UNHEALTHY, Ordering::AcqRel);
+        if previous != UNHEALTHY {
+            // Static reason only: never error text or panic payloads.
+            tracing::warn!(plugin = self.name, reason, "plugin marked unhealthy");
+        }
     }
     /// Called after `try_send` reported a full queue: counts the drop and marks the slot
     /// `Lagged`.
@@ -332,6 +438,19 @@ enum Outcome {
     Failed,
     Panicked,
     TimedOut,
+    Cancelled,
+}
+impl Outcome {
+    /// Static, payload-free reason used for logging and transitions to Unhealthy.
+    fn reason(&self) -> &'static str {
+        match self {
+            Outcome::Ok => "ok",
+            Outcome::Failed => "failed",
+            Outcome::Panicked => "panicked",
+            Outcome::TimedOut => "timed_out",
+            Outcome::Cancelled => "cancelled",
+        }
+    }
 }
 struct AbortOnDrop(JoinHandle<PluginResult>);
 impl Drop for AbortOnDrop {
@@ -358,6 +477,7 @@ async fn call(
     match tokio::time::timeout(timeout, &mut guard.0).await {
         Ok(Ok(Ok(()))) => Outcome::Ok,
         Ok(Ok(Err(_))) => Outcome::Failed,
+        Ok(Err(e)) if e.is_cancelled() => Outcome::Cancelled,
         Ok(Err(_)) => Outcome::Panicked,
         Err(_) => Outcome::TimedOut,
     }
@@ -424,7 +544,7 @@ impl PluginHost {
             let slot = handle.slot.clone();
             let outcome = call(slot.plugin.clone(), context.clone(), Hook::Start, timeout).await;
             if outcome != Outcome::Ok {
-                slot.mark_unhealthy();
+                slot.mark_unhealthy(outcome.reason());
                 handle.rx = None;
                 if slot.required {
                     return Err(WorkerError::Plugin {
@@ -459,8 +579,14 @@ impl PluginHost {
         self.dispatch.health()
     }
 
-    /// Stop dispatch, then per plugin in reverse registration order: stop its supervisor,
-    /// call `on_shutdown` (initialized plugins only) and join, all bounded by `deadline`.
+    /// Plugin shutdown phase, bounded by half of the time left until `deadline` so the
+    /// Gateway/relay/client stages always keep at least the other half.
+    ///
+    /// Every supervisor is signalled first (dropping and thereby aborting any in-flight
+    /// callback). Then, per plugin in reverse registration order: join its supervisor and
+    /// run `on_shutdown` (initialized plugins only), each hook capped by
+    /// `min(timeout, remaining plugin-phase time)`. Anything still running when the phase
+    /// ends is aborted and joined. Idempotent.
     pub(crate) async fn shutdown(
         &mut self,
         context: &WorkerContext,
@@ -468,18 +594,25 @@ impl PluginHost {
         deadline: tokio::time::Instant,
     ) {
         self.dispatch.stop();
-        for handle in self.handles.iter_mut().rev() {
+        let now = tokio::time::Instant::now();
+        let phase_deadline = now + deadline.saturating_duration_since(now) / 2;
+        for handle in &self.handles {
             let _ = handle.stop.send(true);
+        }
+        for handle in self.handles.iter_mut().rev() {
             if let Some(mut task) = handle.task.take()
-                && tokio::time::timeout_at(deadline, &mut task).await.is_err()
+                && tokio::time::timeout_at(phase_deadline, &mut task)
+                    .await
+                    .is_err()
             {
                 task.abort();
                 let _ = task.await;
-                handle.slot.mark_unhealthy();
+                handle.slot.mark_unhealthy("timed_out");
             }
             if handle.initialized {
                 handle.initialized = false;
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                let remaining =
+                    phase_deadline.saturating_duration_since(tokio::time::Instant::now());
                 let outcome = call(
                     handle.slot.plugin.clone(),
                     context.clone(),
@@ -488,7 +621,7 @@ impl PluginHost {
                 )
                 .await;
                 if outcome != Outcome::Ok {
-                    handle.slot.mark_unhealthy();
+                    handle.slot.mark_unhealthy(outcome.reason());
                 }
             }
         }
@@ -519,16 +652,24 @@ async fn supervise(
             _ = &mut stop => return,
             event = rx.recv() => match event { Some(e) => e, None => return },
         };
-        let outcome = call(
-            slot.plugin.clone(),
-            context.clone(),
-            Hook::Event(event),
-            timeout,
-        )
-        .await;
-        if matches!(outcome, Outcome::Panicked | Outcome::TimedOut) {
+        // Race the in-flight callback against `stop`: dropping the `call` future aborts
+        // the callback task (AbortOnDrop), so a wedged callback cannot outlive shutdown.
+        let outcome = tokio::select! {
+            biased;
+            _ = &mut stop => return,
+            outcome = call(
+                slot.plugin.clone(),
+                context.clone(),
+                Hook::Event(event),
+                timeout,
+            ) => outcome,
+        };
+        if matches!(
+            outcome,
+            Outcome::Panicked | Outcome::TimedOut | Outcome::Cancelled
+        ) {
             // Sticky; never retried. Dropping `rx` makes further dispatch a no-op.
-            slot.mark_unhealthy();
+            slot.mark_unhealthy(outcome.reason());
             return;
         }
         if rx.is_empty() {

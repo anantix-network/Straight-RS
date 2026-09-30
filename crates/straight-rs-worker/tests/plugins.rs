@@ -2,14 +2,16 @@ use axum::{body::Body, extract::ConnectInfo, http::Request};
 use std::{
     net::SocketAddr,
     sync::{Arc, Mutex, atomic::Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use straight_rs::NodeConfig;
-use straight_rs_model::UserId;
+use straight_rs_model::{GuildId, UserId};
 use straight_rs_worker::{
-    PluginError, PluginFuture, PluginStatus, RunningWorker, SecretString, WorkerBuilder,
-    WorkerConfig, WorkerConfigBuilder, WorkerContext, WorkerEvent, WorkerPlugin,
+    GatewayCommand, GatewayDriver, GatewayEvent, GatewayFuture, PluginError, PluginFuture,
+    PluginStatus, RunningWorker, SecretString, WorkerBuilder, WorkerConfig, WorkerConfigBuilder,
+    WorkerContext, WorkerError, WorkerEvent, WorkerPlugin,
 };
+use tokio::sync::{mpsc, watch};
 use tower::ServiceExt;
 #[allow(dead_code)]
 mod common {
@@ -31,6 +33,8 @@ enum Mode {
     PanicEvent,
     HangEvent,
     BlockEvent,
+    HangStart,
+    HangShutdown,
 }
 struct Recorder {
     name: &'static str,
@@ -69,6 +73,7 @@ impl WorkerPlugin for Handle {
             match self.0.mode {
                 Mode::FailStart => Err(PluginError::new("boom-secret-text")),
                 Mode::PanicStart => panic!("start panic payload"),
+                Mode::HangStart => std::future::pending().await,
                 _ => Ok(()),
             }
         })
@@ -92,6 +97,9 @@ impl WorkerPlugin for Handle {
                 .lock()
                 .unwrap()
                 .push(format!("{}:shutdown", self.0.name));
+            if self.0.mode == Mode::HangShutdown {
+                std::future::pending::<()>().await;
+            }
             Ok(())
         })
     }
@@ -140,7 +148,15 @@ async fn ready_worker(
     config: WorkerConfig,
     plugins: Vec<(Arc<Recorder>, bool)>,
 ) -> RunningWorker {
-    let mut builder = WorkerBuilder::new(config, ControlledGateway::new(false));
+    ready_worker_with(mock, ControlledGateway::new(false), config, plugins).await
+}
+async fn ready_worker_with(
+    mock: &MockLavalink,
+    gateway: impl GatewayDriver,
+    config: WorkerConfig,
+    plugins: Vec<(Arc<Recorder>, bool)>,
+) -> RunningWorker {
+    let mut builder = WorkerBuilder::new(config, gateway);
     for (p, required) in plugins {
         builder = if required {
             builder.plugin(Handle(p))
@@ -152,6 +168,68 @@ async fn ready_worker(
     let _ = mock;
     wait_for("readiness", || worker.status().ready).await;
     worker
+}
+fn has_event(events: &Log, needle: &'static str) -> impl FnMut() -> bool + use<> {
+    let events = events.clone();
+    move || events.lock().unwrap().iter().any(|e| e.contains(needle))
+}
+
+/// Gateway that reports Ready and then ends on demand (drops its event sender).
+struct EndingGateway {
+    end: Arc<tokio::sync::Notify>,
+}
+impl GatewayDriver for EndingGateway {
+    fn run<'a>(
+        &'a self,
+        _token: SecretString,
+        _bot_user_id: UserId,
+        _commands: mpsc::Receiver<GatewayCommand>,
+        events: mpsc::Sender<GatewayEvent>,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> GatewayFuture<'a> {
+        let end = self.end.clone();
+        Box::pin(async move {
+            events
+                .send(GatewayEvent::Ready)
+                .await
+                .map_err(|_| WorkerError::GatewayClosed)?;
+            tokio::select! {
+                _ = end.notified() => Ok(()),
+                _ = shutdown.changed() => Ok(()),
+            }
+        })
+    }
+}
+
+/// Plugin that only hands its `WorkerContext` back to the test.
+struct CtxProbe(Arc<Mutex<Option<WorkerContext>>>);
+impl WorkerPlugin for CtxProbe {
+    fn name(&self) -> &'static str {
+        "probe"
+    }
+    fn on_start(&self, context: WorkerContext) -> PluginFuture<'_> {
+        Box::pin(async move {
+            *self.0.lock().unwrap() = Some(context);
+            Ok(())
+        })
+    }
+    fn on_event(&self, _c: WorkerContext, _e: WorkerEvent) -> PluginFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
+    fn on_shutdown(&self, _c: WorkerContext) -> PluginFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
+}
+async fn probe_worker(mock: &MockLavalink) -> (RunningWorker, WorkerContext) {
+    let slot: Arc<Mutex<Option<WorkerContext>>> = Arc::default();
+    let worker = WorkerBuilder::new(config(mock), ControlledGateway::new(false))
+        .plugin(CtxProbe(slot.clone()))
+        .build()
+        .await
+        .unwrap();
+    wait_for("readiness", || worker.status().ready).await;
+    let context = slot.lock().unwrap().clone().expect("on_start ran");
+    (worker, context)
 }
 
 #[tokio::test]
@@ -420,4 +498,241 @@ async fn healthz_reports_plugins_without_error_text_and_events_hide_user_data() 
             {"name": "good", "required": true, "status": "healthy", "droppedEvents": 0},
         ])
     );
+}
+
+fn shutdown_config(mock: &MockLavalink) -> WorkerConfig {
+    let mut cfg = config(mock);
+    // A callback timeout far larger than the whole shutdown budget: only the shared
+    // deadline can bound a wedged hook.
+    cfg.callback_timeout = Duration::from_secs(5);
+    cfg.shutdown_timeout = Duration::from_millis(600);
+    cfg
+}
+const SHUTDOWN_SLACK: Duration = Duration::from_millis(500);
+
+#[tokio::test]
+async fn hanging_on_shutdown_is_bounded_and_gateway_still_gets_grace() {
+    let mock = MockLavalink::start().await;
+    let log: Log = Arc::default();
+    let (a, _) = Recorder::new("a", Mode::HangShutdown, &log);
+    let (b, _) = Recorder::new("b", Mode::Normal, &log);
+    let (c, _) = Recorder::new("c", Mode::Normal, &log);
+    let gateway = ControlledGateway::new(false);
+    let stopped = gateway.stopped.clone();
+    let cfg = shutdown_config(&mock);
+    let budget = cfg.shutdown_timeout;
+    let mut worker =
+        ready_worker_with(&mock, gateway, cfg, vec![(a, true), (b, true), (c, true)]).await;
+    let started = Instant::now();
+    let result = tokio::time::timeout(Duration::from_secs(5), worker.shutdown())
+        .await
+        .expect("shutdown must be bounded");
+    let elapsed = started.elapsed();
+    assert!(elapsed < budget + SHUTDOWN_SLACK, "took {elapsed:?}");
+    let shutdowns: Vec<_> = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.ends_with(":shutdown"))
+        .cloned()
+        .collect();
+    assert_eq!(shutdowns, ["c:shutdown", "b:shutdown", "a:shutdown"]);
+    assert!(
+        stopped.load(Ordering::SeqCst),
+        "gateway must be signalled, not aborted"
+    );
+    assert!(
+        result.is_ok(),
+        "gateway had grace to stop cleanly: {result:?}"
+    );
+    assert_eq!(status_of(&worker, "a"), PluginStatus::Unhealthy);
+}
+
+#[tokio::test]
+async fn hanging_in_flight_event_does_not_starve_shutdown() {
+    let mock = MockLavalink::start().await;
+    let log: Log = Arc::default();
+    let (hang, hang_events) = Recorder::new("hang", Mode::HangEvent, &log);
+    let (good, _) = Recorder::new("good", Mode::Normal, &log);
+    let gateway = ControlledGateway::new(false);
+    let stopped = gateway.stopped.clone();
+    let cfg = shutdown_config(&mock);
+    let budget = cfg.shutdown_timeout;
+    let mut worker = ready_worker_with(&mock, gateway, cfg, vec![(hang, true), (good, true)]).await;
+    wait_for("hang plugin in flight", has_event(&hang_events, "Ready")).await;
+    let started = Instant::now();
+    let result = tokio::time::timeout(Duration::from_secs(5), worker.shutdown())
+        .await
+        .expect("shutdown must be bounded");
+    let elapsed = started.elapsed();
+    assert!(elapsed < budget + SHUTDOWN_SLACK, "took {elapsed:?}");
+    let log = log.lock().unwrap().clone();
+    assert!(log.contains(&"good:shutdown".to_string()), "{log:?}");
+    assert!(log.contains(&"hang:shutdown".to_string()), "{log:?}");
+    assert!(stopped.load(Ordering::SeqCst));
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[tokio::test]
+async fn required_hanging_start_fails_build_with_plugin_error_and_stops_gateway() {
+    let mock = MockLavalink::start().await;
+    let log: Log = Arc::default();
+    let (a, _) = Recorder::new("a", Mode::Normal, &log);
+    let (bad, _) = Recorder::new("bad", Mode::HangStart, &log);
+    let gateway = ControlledGateway::new(false);
+    let stopped = gateway.stopped.clone();
+    let mut cfg = config(&mock);
+    cfg.callback_timeout = Duration::from_millis(150);
+    let started = Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        WorkerBuilder::new(cfg, gateway)
+            .plugin(Handle(a))
+            .plugin(Handle(bad))
+            .build(),
+    )
+    .await
+    .expect("build must be bounded");
+    assert!(started.elapsed() >= Duration::from_millis(150));
+    match result.err().expect("required hanging start fails build") {
+        WorkerError::Plugin { name, .. } => assert_eq!(name, "bad"),
+        other => panic!("unexpected error {other:?}"),
+    }
+    assert!(stopped.load(Ordering::SeqCst), "gateway must be stopped");
+    assert!(log.lock().unwrap().contains(&"a:shutdown".to_string()));
+}
+
+#[tokio::test]
+async fn optional_hanging_start_leaves_worker_up_and_plugin_unhealthy() {
+    let mock = MockLavalink::start().await;
+    let log: Log = Arc::default();
+    let (bad, _) = Recorder::new("bad", Mode::HangStart, &log);
+    let (good, good_events) = Recorder::new("good", Mode::Normal, &log);
+    let mut cfg = config(&mock);
+    cfg.callback_timeout = Duration::from_millis(150);
+    let mut worker = ready_worker(&mock, cfg, vec![(bad, false), (good, true)]).await;
+    assert_eq!(status_of(&worker, "bad"), PluginStatus::Unhealthy);
+    assert_eq!(status_of(&worker, "good"), PluginStatus::Healthy);
+    wait_for("good Ready", has_event(&good_events, "Ready")).await;
+    worker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn degraded_and_node_disconnected_reach_plugins() {
+    let mock = MockLavalink::start().await;
+    let log: Log = Arc::default();
+    let (p, events) = Recorder::new("p", Mode::Normal, &log);
+    let end = Arc::new(tokio::sync::Notify::new());
+    let mut worker = ready_worker_with(
+        &mock,
+        EndingGateway { end: end.clone() },
+        config(&mock),
+        vec![(p, true)],
+    )
+    .await;
+    mock.close_websockets();
+    wait_for("NodeDisconnected", has_event(&events, "NodeDisconnected")).await;
+    // The gateway ending closes the event channel, which the relay reports as Degraded.
+    end.notify_one();
+    wait_for("Degraded", has_event(&events, "Degraded")).await;
+    assert!(worker.status().degraded);
+    worker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_twice_is_safe() {
+    let mock = MockLavalink::start().await;
+    let log: Log = Arc::default();
+    let (a, _) = Recorder::new("a", Mode::Normal, &log);
+    let mut worker = ready_worker(&mock, config(&mock), vec![(a, true)]).await;
+    worker.shutdown().await.unwrap();
+    worker.shutdown().await.unwrap();
+    let shutdowns = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.ends_with(":shutdown"))
+        .count();
+    assert_eq!(shutdowns, 1, "on_shutdown runs once");
+}
+
+#[tokio::test]
+async fn duplicate_plugin_names_are_rejected_before_anything_starts() {
+    let mock = MockLavalink::start().await;
+    let log: Log = Arc::default();
+    let (first, _) = Recorder::new("dup", Mode::Normal, &log);
+    let (second, _) = Recorder::new("dup", Mode::Normal, &log);
+    let gateway = ControlledGateway::new(false);
+    let stopped = gateway.stopped.clone();
+    let result = WorkerBuilder::new(config(&mock), gateway)
+        .plugin(Handle(first))
+        .optional_plugin(Handle(second))
+        .build()
+        .await;
+    match result.err().expect("duplicate names must fail build") {
+        WorkerError::Config(message) => assert!(message.contains("dup"), "{message}"),
+        other => panic!("unexpected error {other:?}"),
+    }
+    assert!(log.lock().unwrap().is_empty(), "no plugin hook may run");
+    assert!(!stopped.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn plugin_player_play_encoded_patches_with_no_replace() {
+    let mock = MockLavalink::start().await;
+    let (mut worker, context) = probe_worker(&mock).await;
+    let player = context.player(GuildId(1));
+    player.play_encoded("enc-next").await.unwrap();
+    let patch = mock
+        .requests()
+        .into_iter()
+        .find(|r| r.method == "PATCH" && r.path.contains("/players/1"))
+        .expect("player PATCH reached the node");
+    assert_eq!(patch.body["track"]["encoded"], "enc-next");
+    assert!(patch.query.contains("noReplace=true"), "{}", patch.query);
+    assert_eq!(player.guild_id(), GuildId(1));
+    let track = player.track().expect("track projected");
+    assert_eq!(&*track.encoded, "enc-next");
+    let shown = format!("{track:?}");
+    assert!(!shown.contains("synthetic-user-secret") && !shown.contains("synthetic-plugin-secret"));
+    worker.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn plugin_player_errors_and_debug_carry_no_secrets() {
+    let mock = MockLavalink::start().await;
+    let (mut worker, context) = probe_worker(&mock).await;
+    let player = context.player(GuildId(1));
+    // A successful update makes the player hold a voice-bearing response.
+    player.play_encoded("enc-ok").await.unwrap();
+    let debug = format!("{player:?}");
+    for leaked in [
+        "synthetic-voice-token",
+        "synthetic-voice-endpoint",
+        "synthetic-voice-session",
+        "token",
+        "endpoint",
+    ] {
+        assert!(!debug.contains(leaked), "{leaked} in {debug}");
+    }
+    assert!(debug.contains("PluginPlayer"), "{debug}");
+    mock.fail_player_updates(true);
+    let error = player.set_volume(50).await.expect_err("node answers 500");
+    let error2 = player
+        .play_encoded("enc-again")
+        .await
+        .expect_err("node answers 500");
+    for error in [error, error2] {
+        for text in [error.to_string(), format!("{error:?}")] {
+            for leaked in [
+                "synthetic-provider-secret",
+                "/v4/sessions",
+                "test-session",
+                "Internal Server Error",
+            ] {
+                assert!(!text.contains(leaked), "{leaked} in {text}");
+            }
+        }
+    }
+    worker.shutdown().await.unwrap();
 }

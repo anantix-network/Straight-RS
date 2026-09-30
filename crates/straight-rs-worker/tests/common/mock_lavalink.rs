@@ -16,6 +16,8 @@ use std::{
 pub struct Recorded {
     pub method: String,
     pub path: String,
+    #[allow(dead_code)]
+    pub query: String,
     pub body: Value,
 }
 
@@ -28,7 +30,11 @@ pub struct MockLavalink {
     load_body: Arc<Mutex<Value>>,
     load_count: Arc<std::sync::atomic::AtomicUsize>,
     frames: tokio::sync::broadcast::Sender<String>,
+    fail_patch: Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// Websocket frame that makes the mock close every connected socket.
+const CLOSE_FRAME: &str = "__close__";
 
 pub fn synthetic_track(encoded: &str) -> Value {
     serde_json::json!({
@@ -61,6 +67,7 @@ impl MockLavalink {
                     tokio::select! {
                         incoming = socket.recv() => if incoming.is_none() { break },
                         frame = frames.recv() => match frame {
+                            Ok(text) if text == CLOSE_FRAME => break,
                             Ok(text) => { let _ = socket.send(Message::Text(text.into())).await; }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                             Err(_) => break,
@@ -78,12 +85,17 @@ impl MockLavalink {
         let load_handle = load_body.clone();
         let load_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let load_counter = load_count.clone();
+        let fail_patch = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fail_flag = fail_patch.clone();
         let app = Router::new().route("/v4/websocket", get(move |upgrade: WebSocketUpgrade| ws_handler(upgrade, ready_rx.clone(), frames_tx.subscribe()))).fallback(move |method: Method, uri: axum::http::Uri, body: Bytes| {
             let recorded = recorded.clone();
+            let fail_flag = fail_flag.clone();
             async move {
                 let value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                recorded.lock().unwrap().push(Recorded { method: method.to_string(), path: uri.path().to_owned(), body: value.clone() });
-                if method == Method::PATCH {
+                recorded.lock().unwrap().push(Recorded { method: method.to_string(), path: uri.path().to_owned(), query: uri.query().unwrap_or_default().to_owned(), body: value.clone() });
+                if method == Method::PATCH && fail_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                    (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(serde_json::json!({"timestamp": 0, "status": 500, "error": "Internal Server Error", "message": "synthetic-provider-secret", "path": uri.path()}))).into_response()
+                } else if method == Method::PATCH {
                     let track = value["track"]["encoded"].as_str().map(synthetic_track);
                     axum::Json(serde_json::json!({"guildId": "1", "track": track, "volume": 100, "paused": false, "state": {"time": 0, "position": 0, "connected": true, "ping": 1}, "voice": {"token": "synthetic-voice-token", "endpoint": "synthetic-voice-endpoint.example:443", "sessionId": "synthetic-voice-session"}, "filters": {}})).into_response()
                 } else { StatusCode::NO_CONTENT.into_response() }
@@ -110,7 +122,19 @@ impl MockLavalink {
             load_body: load_handle,
             load_count,
             frames: frames_handle,
+            fail_patch,
         }
+    }
+    /// Make every player PATCH answer 500 with a body carrying a synthetic secret.
+    #[allow(dead_code)]
+    pub fn fail_player_updates(&self, fail: bool) {
+        self.fail_patch
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+    /// Close every connected websocket (the client sees a node disconnect).
+    #[allow(dead_code)]
+    pub fn close_websockets(&self) {
+        self.push_frame(CLOSE_FRAME.to_owned());
     }
     /// Push a synthetic websocket text frame to every connected client.
     #[allow(dead_code)]

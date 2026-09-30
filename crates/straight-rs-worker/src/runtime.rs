@@ -49,6 +49,17 @@ impl<D: GatewayDriver> WorkerBuilder<D> {
         self
     }
     pub async fn build(self) -> WorkerResult<RunningWorker> {
+        for (index, registration) in self.plugins.iter().enumerate() {
+            let name = registration.plugin.name();
+            if self.plugins[..index]
+                .iter()
+                .any(|earlier| earlier.plugin.name() == name)
+            {
+                return Err(WorkerError::Config(format!(
+                    "duplicate plugin name `{name}`"
+                )));
+            }
+        }
         let WorkerConfig {
             bot_user_id,
             bot_token,

@@ -14,7 +14,7 @@
 //!     .optional_plugin(queue) // or `.plugin(queue)` to make startup depend on it
 //!     .build()
 //!     .await?;
-//! handle.lock().unwrap().enqueue(guild, track);
+//! let accepted = handle.lock().unwrap().enqueue(guild, track); // false when full (100)
 //! ```
 //!
 //! This example does not start a worker (that needs real Discord/Lavalink credentials);
@@ -24,21 +24,32 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
 };
-use straight_rs::{UpdatePlayer, UpdateTrack};
 use straight_rs_model::GuildId;
 use straight_rs_worker::{
     PluginError, PluginFuture, PluginTrack, WorkerContext, WorkerEvent, WorkerPlugin,
 };
 
-/// Pure queue logic: a FIFO of tracks per guild.
+/// Maximum queued tracks per guild; further `enqueue` calls are refused.
+pub const MAX_QUEUE_LEN: usize = 100;
+
+/// Pure queue logic: a bounded FIFO of tracks per guild.
+///
+/// The next track is popped *before* it is started, so a failed play (node error,
+/// timeout) drops that track: the example does not retry or re-queue.
 #[derive(Default)]
 pub struct QueueState {
     queues: HashMap<GuildId, VecDeque<PluginTrack>>,
 }
 
 impl QueueState {
-    pub fn enqueue(&mut self, guild: GuildId, track: PluginTrack) {
-        self.queues.entry(guild).or_default().push_back(track);
+    /// Returns `false` (and drops nothing already queued) when the guild's queue is full.
+    pub fn enqueue(&mut self, guild: GuildId, track: PluginTrack) -> bool {
+        let queue = self.queues.entry(guild).or_default();
+        if queue.len() >= MAX_QUEUE_LEN {
+            return false;
+        }
+        queue.push_back(track);
+        true
     }
 
     /// The next track for `guild`, only when the finished track allows starting a new one.
@@ -110,13 +121,7 @@ impl WorkerPlugin for QueuePlugin {
             };
             context
                 .player(guild)
-                .update(UpdatePlayer {
-                    track: Some(UpdateTrack {
-                        encoded: Some(Some(track.encoded)),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                })
+                .play_encoded(&track.encoded)
                 .await
                 .map_err(|_| PluginError::new("failed to start next queued track"))
         })
@@ -181,6 +186,24 @@ mod tests {
             &*state.next_after_end(GuildId(2), true).unwrap().encoded,
             "b1"
         );
+    }
+
+    #[test]
+    fn queue_is_capped_per_guild() {
+        let mut state = QueueState::default();
+        for i in 0..MAX_QUEUE_LEN {
+            assert!(state.enqueue(GuildId(1), track(&format!("t{i}"))));
+        }
+        assert!(!state.enqueue(GuildId(1), track("overflow")));
+        // Another guild is unaffected.
+        assert!(state.enqueue(GuildId(2), track("other")));
+        // Popping frees a slot and order is preserved.
+        assert_eq!(
+            &*state.next_after_end(GuildId(1), true).unwrap().encoded,
+            "t0"
+        );
+        assert!(state.enqueue(GuildId(1), track("again")));
+        assert!(!state.enqueue(GuildId(1), track("overflow-again")));
     }
 
     #[test]

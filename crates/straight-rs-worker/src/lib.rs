@@ -12,7 +12,7 @@ pub use config::{SecretString, WorkerConfig, WorkerConfigBuilder};
 pub use error::{WorkerError, WorkerResult};
 pub use gateway::{GatewayCommand, GatewayDriver, GatewayEvent, GatewayFuture, GatewayVoiceProxy};
 pub use plugin::{
-    PluginError, PluginFuture, PluginHealth, PluginResult, PluginStatus, PluginTrack,
+    PluginError, PluginFuture, PluginHealth, PluginPlayer, PluginResult, PluginStatus, PluginTrack,
     WorkerContext, WorkerEvent, WorkerPlugin,
 };
 pub use runtime::{RunningWorker, WorkerBuilder};
