@@ -9,8 +9,12 @@
 //! counts it and marks that plugin [`PluginStatus::Lagged`]; the Gateway/Lavalink relay
 //! never blocks.
 //!
-//! A timed-out callback is `abort()`ed, but a callback that blocks its thread without
-//! yielding cannot be interrupted by the runtime.
+//! Plugin hooks must not block synchronously; they must yield while awaiting work. The
+//! callback timeout is cooperative: timeout/cancellation is effective only while Tokio
+//! can schedule and poll the hook. A hook that blocks its executor thread without yielding
+//! cannot be interrupted by task timeout or abort and can starve other tasks. Hard
+//! preemption requires process isolation, which is out of scope for these trusted,
+//! statically linked in-process plugins.
 //!
 //! What a plugin can reach: the whitelisted [`WorkerEvent`]s (tracks are sanitized
 //! [`PluginTrack`]s without `user_data` or Lavalink plugin metadata) and a
@@ -67,6 +71,10 @@ impl std::error::Error for PluginError {}
 pub type PluginResult = std::result::Result<(), PluginError>;
 pub type PluginFuture<'a> = straight_rs::BoxFuture<'a, PluginResult>;
 
+/// Trusted in-process plugin hooks. Implementations must not block synchronously; use
+/// yielding async operations instead. Callback deadlines can time out/cancel a hook only
+/// while Tokio can schedule and poll it. Hard preemption requires process isolation, which
+/// is outside this in-process plugin contract.
 pub trait WorkerPlugin: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     fn on_start(&self, context: WorkerContext) -> PluginFuture<'_>;
