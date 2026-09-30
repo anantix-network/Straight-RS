@@ -9,7 +9,7 @@ pub fn connection_info(info: &ConnectionInfo) -> (GuildId, VoiceState) {
             token: info.token.clone(),
             endpoint: info.endpoint.clone(),
             session_id: info.session_id.clone(),
-            channel_id: Some(ChannelId(info.channel_id.0.get())),
+            channel_id: ChannelId(info.channel_id.0.get()),
         },
     )
 }
@@ -39,7 +39,7 @@ mod tests {
                 vs.session_id.as_str(),
                 vs.channel_id
             ),
-            ("tok", "e:443", "sess", Some(ChannelId(9)))
+            ("tok", "e:443", "sess", ChannelId(9))
         );
     }
 }

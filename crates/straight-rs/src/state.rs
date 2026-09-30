@@ -226,7 +226,7 @@ fn merge(user: UpdatePlayer, base: UpdatePlayer) -> UpdatePlayer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use straight_rs_model::VoiceState;
+    use straight_rs_model::{ChannelId, VoiceState};
     fn track(enc: &str, len: u64, stream: bool) -> straight_rs_model::Track {
         serde_json::from_value(serde_json::json!({"encoded":enc,"info":{"identifier":"i","isSeekable":true,"author":"a","length":len,"isStream":stream,"position":0,"title":"t","uri":null,"artworkUrl":null,"isrc":null,"sourceName":"s"}})).unwrap()
     }
@@ -298,7 +298,7 @@ mod tests {
             token: "t".into(),
             endpoint: "e".into(),
             session_id: "s".into(),
-            channel_id: None,
+            channel_id: ChannelId(9),
         });
         let u = p.restore_payload().unwrap();
         assert_eq!(u.track.unwrap().encoded, Some(Some("A".into())));
@@ -314,7 +314,7 @@ mod tests {
             token: "t".into(),
             endpoint: "old".into(),
             session_id: "s".into(),
-            channel_id: None,
+            channel_id: ChannelId(9),
         };
         lock(&p.voice).set(&vs);
         lock(&p.voice).mark_sent(vs.clone());

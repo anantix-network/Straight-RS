@@ -11,7 +11,7 @@ pub struct Player {
     pub volume: u16,
     pub paused: bool,
     pub state: PlayerState,
-    pub voice: VoiceState,
+    pub voice: PlayerVoice,
     pub filters: Filters,
 }
 
@@ -23,9 +23,23 @@ pub struct PlayerState {
     pub ping: i64,
 }
 
+/// Voice connection sent to Lavalink. `channel_id` is required since Lavalink 4.2.0,
+/// which uses it for DAVE (Discord's end-to-end encrypted voice); without it Discord
+/// voice connections cannot be established.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceState {
+    pub token: String,
+    pub endpoint: String,
+    pub session_id: String,
+    pub channel_id: ChannelId,
+}
+
+/// The voice connection as reported back by Lavalink in a [`Player`]. Older servers
+/// (and players that never joined a channel) leave `channel_id` out.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerVoice {
     pub token: String,
     pub endpoint: String,
     pub session_id: String,

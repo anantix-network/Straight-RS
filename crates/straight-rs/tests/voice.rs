@@ -107,7 +107,7 @@ async fn direct_voice_update_for_complete_connections() {
         token: "tok".into(),
         endpoint: "e:443".into(),
         session_id: "sess".into(),
-        channel_id: Some(ChannelId(9)),
+        channel_id: ChannelId(9),
     };
     c.voice_update(GuildId(7), vs).await.unwrap();
     assert_eq!(
