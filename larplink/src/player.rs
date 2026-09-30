@@ -1,6 +1,9 @@
 use crate::hub::Hub;
-use crate::state::{PlayerInner, PlayerSnapshot};
-use crate::{ChannelId, Error, Event, Filters, GuildId, LavalinkClient, Result, Track, UpdatePlayer, UpdateTrack};
+use crate::state::{lock, PlayerInner, PlayerSnapshot};
+use crate::{
+    ChannelId, Error, Event, Filters, GuildId, LavalinkClient, Result, Track, UpdatePlayer, UpdateTrack,
+    VoiceOutcome, VoiceServerUpdate, VoiceState, VoiceStateUpdate,
+};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -154,5 +157,47 @@ impl Player {
 
     fn gateway(&self) -> Result<&Arc<dyn crate::VoiceGateway>> {
         self.hub.gateway.as_ref().ok_or_else(|| Error::Config("no voice gateway configured".into()))
+    }
+}
+
+impl Player {
+    pub(crate) async fn apply_voice(&self, outcome: VoiceOutcome) -> Result<()> {
+        match outcome {
+            VoiceOutcome::Pending => Ok(()),
+            VoiceOutcome::Ready(vs) => {
+                self.update(UpdatePlayer { voice: Some(vs.clone()), ..Default::default() }).await?;
+                // Only after the PATCH succeeded, so a failed one is retried by the next identical update.
+                lock(&self.inner.voice).mark_sent(vs);
+                Ok(())
+            }
+            VoiceOutcome::Left => self.destroy().await,
+        }
+    }
+}
+
+impl LavalinkClient {
+    /// Feed `VOICE_STATE_UPDATE`. `channel_id: None` destroys the player.
+    ///
+    /// Callers must only pass voice events for the bot's own user.
+    pub async fn voice_state_update(&self, guild: impl Into<GuildId>, upd: VoiceStateUpdate) -> Result<()> {
+        let p = self.player(guild);
+        let outcome = lock(&p.inner.voice).update_state(upd);
+        p.apply_voice(outcome).await
+    }
+
+    /// Feed `VOICE_SERVER_UPDATE`.
+    ///
+    /// Callers must only pass voice events for the bot's own user.
+    pub async fn voice_server_update(&self, guild: impl Into<GuildId>, upd: VoiceServerUpdate) -> Result<()> {
+        let p = self.player(guild);
+        let outcome = lock(&p.inner.voice).update_server(upd);
+        p.apply_voice(outcome).await
+    }
+
+    /// Hand over a complete voice connection (e.g. from songbird).
+    ///
+    /// Callers must only pass voice events for the bot's own user.
+    pub async fn voice_update(&self, guild: impl Into<GuildId>, vs: VoiceState) -> Result<()> {
+        self.player(guild).apply_voice(VoiceOutcome::Ready(vs)).await
     }
 }
