@@ -206,7 +206,13 @@ impl Node {
                     if last_rx.elapsed() > self.cfg.ping_timeout {
                         return Err(Error::Timeout);
                     }
-                    write.send(Message::Ping(Vec::new())).await?;
+                    // A peer that stops reading must not wedge us here.
+                    tokio::time::timeout(
+                        self.cfg.ping_timeout,
+                        write.send(Message::Ping(Vec::new())),
+                    )
+                    .await
+                    .map_err(|_| Error::Timeout)??;
                 }
             }
         }
