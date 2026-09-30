@@ -24,6 +24,7 @@ Date: 2026-09-30
 ```
 straight-rs/
   Cargo.toml            (workspace)
+crates/
   straight-rs-model/       types + serde for all Lavalink v4 payloads; no async runtime
   straight-rs/             client, node pool, players, events, voice adapters (feature flags)
   tests/                integration tests with a mock Lavalink server

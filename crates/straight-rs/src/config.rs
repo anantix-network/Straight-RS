@@ -1,8 +1,8 @@
 use crate::{Error, Result};
-use std::time::Duration;
+use std::{fmt, time::Duration};
 use tokio_tungstenite::tungstenite::http::{HeaderValue, Uri};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct NodeConfig {
     /// `host:port`
     pub host: String,
@@ -16,6 +16,21 @@ pub struct NodeConfig {
     pub failover_grace: Duration,
     pub ping_interval: Duration,
     pub ping_timeout: Duration,
+}
+
+impl fmt::Debug for NodeConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NodeConfig")
+            .field("host", &self.host)
+            .field("password", &"[REDACTED]")
+            .field("secure", &self.secure)
+            .field("request_timeout", &self.request_timeout)
+            .field("resume_timeout_secs", &self.resume_timeout_secs)
+            .field("failover_grace", &self.failover_grace)
+            .field("ping_interval", &self.ping_interval)
+            .field("ping_timeout", &self.ping_timeout)
+            .finish()
+    }
 }
 
 impl NodeConfig {
@@ -66,6 +81,14 @@ impl NodeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn node_config_debug_redacts_password() {
+        let config = NodeConfig::new("localhost:2333", "lavalink-password");
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("lavalink-password"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
     #[test]
     fn defaults() {
         let c = NodeConfig::new("localhost:2333", "pw");

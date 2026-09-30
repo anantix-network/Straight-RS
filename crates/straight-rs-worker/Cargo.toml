@@ -1,0 +1,49 @@
+[package]
+name = "straight-rs-worker"
+description = "Playback worker runtime and Discord gateway boundary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+serenity = ["dep:serenity", "straight-rs/serenity"]
+twilight = ["dep:twilight-gateway", "dep:twilight-http", "dep:twilight-model", "straight-rs/twilight"]
+test-support = []
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+serde.workspace = true
+serde_json.workspace = true
+subtle = "2"
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+straight-rs.workspace = true
+straight-rs-model.workspace = true
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "rustls_backend"], optional = true }
+twilight-gateway = { version = "0.17.1", optional = true }
+twilight-http = { version = "0.17.1", optional = true }
+twilight-model = { version = "0.17", optional = true }
+
+[dev-dependencies]
+tower = "0.5"
+http-body-util.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+futures-util.workspace = true
+
+[[example]]
+name = "worker-serenity"
+path = "examples/worker-serenity.rs"
+required-features = ["serenity"]
+
+[[example]]
+name = "queue-plugin"
+path = "examples/queue-plugin.rs"
+
+[[bin]]
+name = "worker-client-probe"
+path = "src/bin/worker-client-probe.rs"
+required-features = ["test-support"]

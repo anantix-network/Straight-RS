@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["straight-rs-model", "straight-rs"]
+members = ["crates/straight-rs-model", "crates/straight-rs", "crates/straight-rs-worker"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,7 +14,7 @@ serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
-tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net", "signal", "rt-multi-thread"] }
 tokio-tungstenite = "0.30"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 hyper = { version = "1", features = ["http1", "client"] }
@@ -25,4 +25,5 @@ dashmap = "6"
 arc-swap = "1"
 percent-encoding = "2"
 rand = "0.10"
-straight-rs-model = { path = "straight-rs-model", version = "0.1.0" }
+straight-rs-model = { path = "crates/straight-rs-model", version = "0.1.0" }
+straight-rs = { path = "crates/straight-rs", version = "0.1.0" }

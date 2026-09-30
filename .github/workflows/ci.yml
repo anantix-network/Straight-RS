@@ -10,9 +10,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with: { components: "clippy, rustfmt" }
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace
-      - run: cargo test --workspace --all-features
-      - run: cargo build -p straight-rs --examples
-      - run: cargo bench -p straight-rs --no-run
+      - run: cargo metadata --locked --no-deps --format-version 1
+      - run: cargo --locked fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --workspace
+      - run: cargo test --locked --workspace --all-features
+      - name: Test Serenity adapter feature
+        run: cargo test --locked -p straight-rs --no-default-features --features serenity
+      - name: Test Twilight adapter feature
+        run: cargo test --locked -p straight-rs --no-default-features --features twilight
+      - name: Test Songbird adapter feature
+        run: cargo test --locked -p straight-rs --no-default-features --features songbird
+      - name: Test worker process isolation
+        run: cargo test -p straight-rs-worker --test process --features test-support --locked
+      - name: Check worker examples without optional adapters
+        run: cargo check --locked -p straight-rs-worker --examples
+      - name: Check worker examples with Serenity feature
+        run: cargo check --locked -p straight-rs-worker --examples --features serenity
+      - name: Check worker examples with Twilight feature
+        run: cargo check --locked -p straight-rs-worker --examples --features twilight
+      - name: Build worker examples with all features
+        run: cargo build --locked -p straight-rs-worker --examples --all-features
+      - run: cargo build --locked -p straight-rs --examples
+      - run: cargo bench --locked -p straight-rs --no-run
