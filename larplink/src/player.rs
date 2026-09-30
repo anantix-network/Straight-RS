@@ -1,0 +1,143 @@
+use crate::hub::Hub;
+use crate::state::{PlayerInner, PlayerSnapshot};
+use crate::{ChannelId, Error, Event, Filters, GuildId, LavalinkClient, Result, Track, UpdatePlayer, UpdateTrack};
+use std::sync::Arc;
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::RecvError;
+
+/// Cheap, cloneable handle to one guild's player.
+#[derive(Clone)]
+pub struct Player {
+    pub(crate) hub: Arc<Hub>,
+    pub(crate) inner: Arc<PlayerInner>,
+}
+
+/// Events of a single guild.
+pub struct PlayerEvents {
+    rx: broadcast::Receiver<Event>,
+    guild: GuildId,
+}
+
+impl PlayerEvents {
+    pub async fn recv(&mut self) -> std::result::Result<Event, RecvError> {
+        loop {
+            let e = self.rx.recv().await?;
+            if e.guild() == Some(self.guild) {
+                return Ok(e);
+            }
+        }
+    }
+}
+
+impl LavalinkClient {
+    /// Returns the player for `guild`, creating local state if needed.
+    pub fn player(&self, guild: impl Into<GuildId>) -> Player {
+        let guild = guild.into();
+        let inner = self
+            .hub
+            .players
+            .entry(guild)
+            .or_insert_with(|| Arc::new(PlayerInner::new(guild)))
+            .clone();
+        Player { hub: self.hub.clone(), inner }
+    }
+
+    pub fn get_player(&self, guild: impl Into<GuildId>) -> Option<Player> {
+        let inner = self.hub.players.get(&guild.into())?.clone();
+        Some(Player { hub: self.hub.clone(), inner })
+    }
+}
+
+impl Player {
+    pub fn guild_id(&self) -> GuildId { self.inner.guild }
+    pub fn snapshot(&self) -> Arc<PlayerSnapshot> { self.inner.snapshot() }
+    /// Interpolated position in ms; never awaits.
+    pub fn position(&self) -> u64 { self.inner.snapshot().position_now() }
+    pub fn track(&self) -> Option<Arc<Track>> { self.inner.snapshot().track.clone() }
+    pub fn is_paused(&self) -> bool { self.inner.snapshot().paused }
+    pub fn volume(&self) -> u16 { self.inner.snapshot().volume }
+    pub fn node_index(&self) -> Option<usize> { self.inner.node_index() }
+
+    pub fn events(&self) -> PlayerEvents {
+        PlayerEvents { rx: self.hub.events.subscribe(), guild: self.inner.guild }
+    }
+
+    pub async fn update(&self, upd: UpdatePlayer) -> Result<()> {
+        self.update_with(upd, false).await
+    }
+
+    /// `no_replace = true` keeps the current track if one is playing.
+    pub async fn update_with(&self, upd: UpdatePlayer, no_replace: bool) -> Result<()> {
+        let _gate = self.inner.gate.lock().await;
+        let node = self.hub.node_for(&self.inner)?;
+        let sid = node.session_id().ok_or(Error::NoNode)?;
+        let resp = node.rest().update_player(&sid, self.inner.guild, &upd, no_replace).await?;
+        self.inner.apply_player(&resp);
+        Ok(())
+    }
+
+    pub async fn play(&self, track: &Track) -> Result<()> {
+        let user_data = (!track.user_data.is_null()).then(|| track.user_data.clone());
+        self.update(UpdatePlayer {
+            track: Some(UpdateTrack { encoded: Some(Some(track.encoded.clone())), user_data, ..Default::default() }),
+            ..Default::default()
+        })
+        .await
+    }
+
+    pub async fn stop(&self) -> Result<()> {
+        self.update(UpdatePlayer {
+            track: Some(UpdateTrack { encoded: Some(None), ..Default::default() }),
+            ..Default::default()
+        })
+        .await
+    }
+
+    pub async fn pause(&self, paused: bool) -> Result<()> {
+        self.update(UpdatePlayer { paused: Some(paused), ..Default::default() }).await
+    }
+
+    pub async fn seek(&self, position_ms: u64) -> Result<()> {
+        self.update(UpdatePlayer { position: Some(position_ms), ..Default::default() }).await
+    }
+
+    /// Lavalink accepts 0..=1000.
+    pub async fn set_volume(&self, volume: u16) -> Result<()> {
+        self.update(UpdatePlayer { volume: Some(volume.min(1000)), ..Default::default() }).await
+    }
+
+    pub async fn set_filters(&self, filters: Filters) -> Result<()> {
+        self.update(UpdatePlayer { filters: Some(filters), ..Default::default() }).await
+    }
+
+    /// Destroys the player on its node and forgets local state. A 404 is not an error.
+    pub async fn destroy(&self) -> Result<()> {
+        let _gate = self.inner.gate.lock().await;
+        let guild = self.inner.guild;
+        self.hub.players.remove_if(&guild, |_, v| Arc::ptr_eq(v, &self.inner));
+        let Some(node) = self.inner.node_index().and_then(|i| self.hub.nodes.get(i)) else {
+            return Ok(());
+        };
+        let Some(sid) = node.session_id() else { return Ok(()) };
+        if !node.is_ready() {
+            return Ok(());
+        }
+        match node.rest().destroy_player(&sid, guild).await {
+            Err(Error::Lavalink { status: 404, .. }) => Ok(()),
+            r => r,
+        }
+    }
+
+    /// Joins a voice channel through the configured `VoiceGateway`.
+    pub async fn join(&self, channel: ChannelId) -> Result<()> {
+        self.gateway()?.join(self.inner.guild, channel).await
+    }
+
+    pub async fn leave(&self) -> Result<()> {
+        self.gateway()?.leave(self.inner.guild).await
+    }
+
+    fn gateway(&self) -> Result<&Arc<dyn crate::VoiceGateway>> {
+        self.hub.gateway.as_ref().ok_or_else(|| Error::Config("no voice gateway configured".into()))
+    }
+}

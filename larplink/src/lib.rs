@@ -32,3 +32,7 @@ mod node;
 
 pub use client::{ClientBuilder, LavalinkClient};
 pub use node::{Node, NodeStatus};
+
+mod player;
+
+pub use player::{Player, PlayerEvents};

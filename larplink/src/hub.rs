@@ -68,18 +68,19 @@ impl Hub {
         match msg {
             WsMessage::PlayerUpdate(u) => {
                 if let Some(p) = self.players.get(&u.guild_id) {
+                    if p.node_index().is_some_and(|i| i != node.index) {
+                        return; // stale update from a node the player left
+                    }
                     if p.node_index() == Some(node.index) {
                         p.apply_update(&u.state);
-                    } else {
-                        return; // stale update from a node the player left
                     }
                 }
                 self.emit(Event::PlayerUpdate { node: node.index, guild: u.guild_id, state: u.state });
             }
             WsMessage::Event(ev) => {
                 if let Some(p) = self.players.get(&ev.guild_id()) {
-                    if p.node_index() != Some(node.index) {
-                        return;
+                    if p.node_index().is_some_and(|i| i != node.index) {
+                        return; // stale event from a node the player left
                     }
                     if let larplink_model::Event::TrackEnd { track, reason, .. } = &ev {
                         if *reason != TrackEndReason::Replaced {
