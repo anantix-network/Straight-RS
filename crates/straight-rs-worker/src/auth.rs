@@ -137,6 +137,11 @@ async fn sanitize(request: Request, next: Next) -> Response {
     let response = next.run(request).await;
     let status = response.status();
     if status.is_client_error() || status.is_server_error() {
+        let public_status = if status == StatusCode::UNPROCESSABLE_ENTITY {
+            StatusCode::BAD_REQUEST
+        } else {
+            status
+        };
         let (code, msg) = match status {
             StatusCode::NOT_FOUND => ("not_found", "Route or resource not found."),
             StatusCode::UNAUTHORIZED => ("unauthorized", "A valid bearer token is required."),
@@ -150,7 +155,7 @@ async fn sanitize(request: Request, next: Next) -> Response {
             }
             _ => ("invalid_request", "Request is invalid."),
         };
-        return error_response(status, code, msg);
+        return error_response(public_status, code, msg);
     }
     response
 }

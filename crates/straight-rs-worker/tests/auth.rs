@@ -77,6 +77,33 @@ async fn limits_requests_resets_window_and_rejects_unseen_peer_when_full() {
     assert_eq!(r.status(), StatusCode::OK);
 }
 #[tokio::test]
+async fn same_ip_with_distinct_ports_shares_rate_limit_bucket() {
+    let state = AuthState::new(
+        SecretString::new(TOKEN),
+        RateLimitConfig {
+            requests: 1,
+            window: Duration::from_secs(10),
+            table_capacity: 4,
+        },
+    );
+    let router = auth::secure(
+        Router::new().route("/healthz", get(|| async { "ok" })),
+        state,
+    );
+    let first = router
+        .clone()
+        .oneshot(req(Some(TOKEN), "127.0.0.1:1001"))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let second = router
+        .oneshot(req(Some(TOKEN), "127.0.0.1:2002"))
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
 async fn auth_errors_use_envelope_without_credentials() {
     let r = app()
         .oneshot(req(Some("wrong-secret"), "127.0.0.1:1"))
