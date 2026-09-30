@@ -81,7 +81,7 @@ async fn main() -> straight_rs::Result<()> {
 ```
 
 A complete, compiling version is in
-[`straight-rs/examples/quickstart.rs`](straight-rs/examples/quickstart.rs).
+[`crates/straight-rs/examples/quickstart.rs`](crates/straight-rs/examples/quickstart.rs).
 
 ## Connecting your Discord library
 
