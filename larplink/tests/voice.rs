@@ -148,3 +148,97 @@ async fn join_and_leave_go_through_the_gateway() {
     p.leave().await.unwrap();
     assert_eq!(*fake.0.lock().unwrap(), vec!["join 7 9", "leave 7"]);
 }
+
+#[tokio::test]
+async fn voice_assembled_while_no_node_is_ready_is_sent_with_the_next_write() {
+    let mock = Mock::start().await;
+    let addr = mock.addr.to_string();
+    let c = client(&[&mock]).await;
+    mock.kill();
+    eventually(Duration::from_secs(5), || !c.nodes()[0].is_ready()).await;
+    c.voice_state_update(GuildId(7), su(Some(9))).await.unwrap();
+    let e = c
+        .voice_server_update(GuildId(7), sv(Some("e:443")))
+        .await
+        .unwrap_err();
+    assert!(matches!(e, larplink::Error::NoNode), "{e:?}");
+    let back = Mock::start_on(&addr, false).await;
+    eventually(Duration::from_secs(10), || c.nodes()[0].is_ready()).await;
+    c.player(GuildId(7))
+        .play(&sample_track("ABC"))
+        .await
+        .unwrap();
+    let r = back.requests_matching("PATCH", P7);
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].body["voice"], voice_body());
+    assert_eq!(r[0].body["track"]["encoded"], "ABC");
+    // Delivered now: an identical update is a duplicate.
+    c.voice_state_update(GuildId(7), su(Some(9))).await.unwrap();
+    assert_eq!(back.requests_matching("PATCH", P7).len(), 1);
+}
+
+#[tokio::test]
+async fn failed_voice_patch_is_retried_by_an_identical_update() {
+    let mock = Mock::start().await;
+    let c = client(&[&mock]).await;
+    mock.state
+        .fail_next_patches
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    c.voice_state_update(GuildId(7), su(Some(9))).await.unwrap();
+    let e = c
+        .voice_server_update(GuildId(7), sv(Some("e:443")))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(e, larplink::Error::Lavalink { status: 500, .. }),
+        "{e:?}"
+    );
+    c.voice_server_update(GuildId(7), sv(Some("e:443")))
+        .await
+        .unwrap();
+    let r = mock.requests_matching("PATCH", P7);
+    assert_eq!(r.len(), 2);
+    assert_eq!(r[1].body["voice"], voice_body());
+    c.voice_server_update(GuildId(7), sv(Some("e:443")))
+        .await
+        .unwrap();
+    assert_eq!(mock.requests_matching("PATCH", P7).len(), 2);
+}
+
+/// Concurrent voice handlers: whatever ends up assembled last is what the
+/// node got last (assembly and send happen under the player gate).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_voice_updates_leave_the_node_with_the_last_assembled_state() {
+    let mock = Mock::start().await;
+    let c = client(&[&mock]).await;
+    c.voice_state_update(GuildId(7), su(Some(9))).await.unwrap();
+    for round in 0..5 {
+        let tasks: Vec<_> = (0..32)
+            .map(|i| {
+                let c = c.clone();
+                tokio::spawn(async move {
+                    let ep = format!("r{round}-e{i}:443");
+                    c.voice_server_update(GuildId(7), sv(Some(&ep))).await
+                })
+            })
+            .collect();
+        for t in tasks {
+            t.await.unwrap().unwrap();
+        }
+        let before = mock.requests_matching("PATCH", P7).len();
+        // Re-feeding the (unchanged) state half re-evaluates the assembled
+        // state: it must equal what was sent last, so nothing is sent.
+        c.voice_state_update(GuildId(7), su(Some(9))).await.unwrap();
+        assert_eq!(
+            mock.requests_matching("PATCH", P7).len(),
+            before,
+            "round {round}: node was left with a stale voice state"
+        );
+    }
+    assert_eq!(
+        mock.state
+            .max_in_flight
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}

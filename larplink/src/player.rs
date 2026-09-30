@@ -1,5 +1,6 @@
 use crate::hub::Hub;
 use crate::state::{lock, PlayerInner, PlayerSnapshot};
+use crate::voice::VoiceAssembler;
 use crate::{
     ChannelId, Error, Event, Filters, GuildId, LavalinkClient, Result, Track, UpdatePlayer,
     UpdateTrack, VoiceOutcome, VoiceServerUpdate, VoiceState, VoiceStateUpdate,
@@ -105,6 +106,15 @@ impl Player {
     /// `no_replace = true` keeps the current track if one is playing.
     pub async fn update_with(&self, upd: UpdatePlayer, no_replace: bool) -> Result<()> {
         let _gate = self.inner.gate.lock().await;
+        self.write_locked(upd, no_replace).await
+    }
+
+    /// Sends `upd` to the player's node. The caller holds the gate.
+    ///
+    /// A complete voice state the node does not have yet (e.g. one assembled
+    /// while no node was ready, or whose PATCH failed) rides along unless
+    /// `upd` carries its own.
+    async fn write_locked(&self, mut upd: UpdatePlayer, no_replace: bool) -> Result<()> {
         if self.hub.is_closed() {
             return Err(Error::Closed);
         }
@@ -113,11 +123,19 @@ impl Player {
         }
         let node = self.hub.node_for(&self.inner)?;
         let sid = node.session_id().ok_or(Error::NoNode)?;
+        if upd.voice.is_none() {
+            upd.voice = lock(&self.inner.voice).pending();
+        }
         let resp = node
             .rest()
             .update_player(&sid, self.inner.guild, &upd, no_replace)
             .await?;
         self.inner.apply_player(&resp);
+        if let Some(vs) = upd.voice {
+            // Only after success, so a failed PATCH is retried by the next
+            // identical update (or the next write).
+            lock(&self.inner.voice).mark_sent(vs);
+        }
         Ok(())
     }
 
@@ -184,6 +202,11 @@ impl Player {
     /// call `LavalinkClient::player` again for a fresh one.
     pub async fn destroy(&self) -> Result<()> {
         let _gate = self.inner.gate.lock().await;
+        self.destroy_locked().await
+    }
+
+    /// `destroy` with the gate already held by the caller.
+    async fn destroy_locked(&self) -> Result<()> {
         self.inner.destroyed.store(true, Ordering::Release);
         let guild = self.inner.guild;
         let res = self.destroy_remote(guild).await;
@@ -232,20 +255,27 @@ impl Player {
 }
 
 impl Player {
-    pub(crate) async fn apply_voice(&self, outcome: VoiceOutcome) -> Result<()> {
+    /// Feeds the voice assembler and sends the result, all under the gate so
+    /// concurrent handlers cannot deliver an older state last.
+    pub(crate) async fn voice_locked(
+        &self,
+        assemble: impl FnOnce(&mut VoiceAssembler) -> VoiceOutcome,
+    ) -> Result<()> {
+        let _gate = self.inner.gate.lock().await;
+        let outcome = assemble(&mut lock(&self.inner.voice));
         match outcome {
             VoiceOutcome::Pending => Ok(()),
             VoiceOutcome::Ready(vs) => {
-                self.update(UpdatePlayer {
-                    voice: Some(vs.clone()),
-                    ..Default::default()
-                })
-                .await?;
-                // Only after the PATCH succeeded, so a failed one is retried by the next identical update.
-                lock(&self.inner.voice).mark_sent(vs);
-                Ok(())
+                self.write_locked(
+                    UpdatePlayer {
+                        voice: Some(vs),
+                        ..Default::default()
+                    },
+                    false,
+                )
+                .await
             }
-            VoiceOutcome::Left => self.destroy().await,
+            VoiceOutcome::Left => self.destroy_locked().await,
         }
     }
 }
@@ -259,9 +289,9 @@ impl LavalinkClient {
         guild: impl Into<GuildId>,
         upd: VoiceStateUpdate,
     ) -> Result<()> {
-        let p = self.player(guild);
-        let outcome = lock(&p.inner.voice).update_state(upd);
-        p.apply_voice(outcome).await
+        self.player(guild)
+            .voice_locked(|v| v.update_state(upd))
+            .await
     }
 
     /// Feed `VOICE_SERVER_UPDATE`.
@@ -272,17 +302,21 @@ impl LavalinkClient {
         guild: impl Into<GuildId>,
         upd: VoiceServerUpdate,
     ) -> Result<()> {
-        let p = self.player(guild);
-        let outcome = lock(&p.inner.voice).update_server(upd);
-        p.apply_voice(outcome).await
+        self.player(guild)
+            .voice_locked(|v| v.update_server(upd))
+            .await
     }
 
     /// Hand over a complete voice connection (e.g. from songbird).
     ///
     /// Callers must only pass voice events for the bot's own user.
     pub async fn voice_update(&self, guild: impl Into<GuildId>, vs: VoiceState) -> Result<()> {
+        // Always sent (not deduplicated): the caller hands over a new connection.
         self.player(guild)
-            .apply_voice(VoiceOutcome::Ready(vs))
+            .voice_locked(|v| {
+                v.set(&vs);
+                VoiceOutcome::Ready(vs)
+            })
             .await
     }
 }

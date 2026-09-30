@@ -60,22 +60,18 @@ impl VoiceAssembler {
         }
     }
 
+    /// A complete connection handed over as a whole (e.g. from songbird).
+    pub(crate) fn set(&mut self, vs: &VoiceState) {
+        self.session_id = Some(vs.session_id.clone());
+        self.channel_id = vs.channel_id;
+        self.token = Some(vs.token.clone());
+        self.endpoint = Some(vs.endpoint.clone());
+    }
+
     fn evaluate(&self) -> VoiceOutcome {
-        let (Some(session_id), Some(token), Some(endpoint)) =
-            (&self.session_id, &self.token, &self.endpoint)
-        else {
-            return VoiceOutcome::Pending;
-        };
-        let vs = VoiceState {
-            token: token.clone(),
-            endpoint: endpoint.clone(),
-            session_id: session_id.clone(),
-            channel_id: self.channel_id,
-        };
-        if self.sent.as_ref() == Some(&vs) {
-            VoiceOutcome::Pending
-        } else {
-            VoiceOutcome::Ready(vs)
+        match self.pending() {
+            Some(vs) => VoiceOutcome::Ready(vs),
+            None => VoiceOutcome::Pending,
         }
     }
 
@@ -84,9 +80,24 @@ impl VoiceAssembler {
         self.sent = Some(vs);
     }
 
-    /// Last voice state successfully delivered to a node.
-    pub(crate) fn current(&self) -> Option<VoiceState> {
-        self.sent.clone()
+    /// The latest complete voice state, whether or not a node has it yet.
+    pub(crate) fn latest(&self) -> Option<VoiceState> {
+        let (Some(session_id), Some(token), Some(endpoint)) =
+            (&self.session_id, &self.token, &self.endpoint)
+        else {
+            return None;
+        };
+        Some(VoiceState {
+            token: token.clone(),
+            endpoint: endpoint.clone(),
+            session_id: session_id.clone(),
+            channel_id: self.channel_id,
+        })
+    }
+
+    /// The latest complete voice state if it differs from what was last sent.
+    pub(crate) fn pending(&self) -> Option<VoiceState> {
+        self.latest().filter(|vs| self.sent.as_ref() != Some(vs))
     }
 }
 
@@ -166,7 +177,8 @@ mod tests {
             a.update_server(sv("t", Some("e"))),
             VoiceOutcome::Pending
         ));
-        assert!(a.current().is_none());
+        assert!(a.latest().is_none());
+        assert!(a.pending().is_none());
     }
     #[test]
     fn duplicates_are_suppressed_after_mark_sent_but_changes_are_not() {
@@ -175,12 +187,37 @@ mod tests {
         let v = expect_ready(a.update_server(sv("t", Some("e"))));
         // not marked sent yet -> would emit again (a failed PATCH can be retried)
         expect_ready(a.update_server(sv("t", Some("e"))));
+        assert_eq!(a.pending(), Some(v.clone()));
         a.mark_sent(v.clone());
-        assert_eq!(a.current(), Some(v));
+        assert_eq!(a.latest(), Some(v));
+        assert!(a.pending().is_none());
         assert!(matches!(
             a.update_server(sv("t", Some("e"))),
             VoiceOutcome::Pending
         ));
         expect_ready(a.update_server(sv("t", Some("new-region"))));
+    }
+    #[test]
+    fn latest_reflects_unsent_changes() {
+        let mut a = VoiceAssembler::default();
+        a.update_state(st(Some(9), "s"));
+        let v = expect_ready(a.update_server(sv("t", Some("e"))));
+        a.mark_sent(v);
+        // Region change whose PATCH failed: latest must be the new endpoint.
+        a.update_server(sv("t", Some("new-region")));
+        assert_eq!(a.latest().unwrap().endpoint, "new-region");
+        assert_eq!(a.pending().unwrap().endpoint, "new-region");
+    }
+    #[test]
+    fn set_takes_a_complete_state() {
+        let mut a = VoiceAssembler::default();
+        let vs = VoiceState {
+            token: "t".into(),
+            endpoint: "e".into(),
+            session_id: "s".into(),
+            channel_id: Some(ChannelId(3)),
+        };
+        a.set(&vs);
+        assert_eq!(a.latest(), Some(vs));
     }
 }

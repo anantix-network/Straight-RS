@@ -422,7 +422,7 @@ mod tests {
             session_id: "s".into(),
             channel_id: None,
         };
-        lock(&p.voice).mark_sent(vs);
+        lock(&p.voice).set(&vs);
     }
 
     #[tokio::test]

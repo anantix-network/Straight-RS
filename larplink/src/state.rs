@@ -144,7 +144,7 @@ impl PlayerInner {
     /// Everything needed to recreate this player on another node.
     pub(crate) fn restore_payload(&self) -> Option<UpdatePlayer> {
         let s = self.snapshot();
-        let voice = lock(&self.voice).current();
+        let voice = lock(&self.voice).latest();
         if s.track.is_none() && voice.is_none() {
             return None;
         }
@@ -237,7 +237,7 @@ mod tests {
         let p = PlayerInner::new(GuildId(1));
         assert!(p.restore_payload().is_none());
         p.apply_player(&model_player(Some(track("A", 100_000, false)), 2_000, true));
-        lock(&p.voice).mark_sent(VoiceState {
+        lock(&p.voice).set(&VoiceState {
             token: "t".into(),
             endpoint: "e".into(),
             session_id: "s".into(),
@@ -249,6 +249,21 @@ mod tests {
         assert_eq!(u.paused, Some(true));
         assert_eq!(u.volume, Some(80));
         assert_eq!(u.voice.unwrap().token, "t");
+    }
+    #[test]
+    fn restore_payload_uses_the_latest_voice_not_the_last_sent_one() {
+        let p = PlayerInner::new(GuildId(1));
+        let mut vs = VoiceState {
+            token: "t".into(),
+            endpoint: "old".into(),
+            session_id: "s".into(),
+            channel_id: None,
+        };
+        lock(&p.voice).set(&vs);
+        lock(&p.voice).mark_sent(vs.clone());
+        vs.endpoint = "new".into(); // region change that was never delivered
+        lock(&p.voice).set(&vs);
+        assert_eq!(p.restore_payload().unwrap().voice.unwrap().endpoint, "new");
     }
     #[test]
     fn restore_payload_skips_position_for_streams() {
