@@ -176,12 +176,12 @@ impl Hub {
     }
 
     /// Finish moving `p` (gate held) to `node`, where it now exists.
-    pub(crate) fn adopt(&self, p: &PlayerInner, node: &Node) {
+    pub(crate) fn adopt(self: &Arc<Self>, p: &PlayerInner, node: &Node) {
         let from = p.node_index();
         p.set_node(node.index);
         p.orphaned.store(false, Ordering::Release);
         if let Some(from) = from.filter(|f| *f != node.index) {
-            self.stale.insert((from, p.guild));
+            self.mark_stale(from, p.guild);
             self.emit(Event::PlayerMigrated {
                 guild: p.guild,
                 from,
@@ -377,7 +377,7 @@ impl Hub {
             {
                 Ok(Restored::Skipped) => {}
                 Ok(Restored::Moved { .. }) => {
-                    self.stale.insert((idx, p.guild));
+                    self.mark_stale(idx, p.guild);
                     self.emit(Event::PlayerMigrated {
                         guild: p.guild,
                         from: idx,
@@ -393,7 +393,7 @@ impl Hub {
     }
 
     /// A node became ready: adopt players that had nowhere to go.
-    pub(crate) async fn rescue_orphans(&self, node: &Arc<Node>) {
+    pub(crate) async fn rescue_orphans(self: &Arc<Self>, node: &Arc<Node>) {
         for p in self.players_where(|p| p.orphaned.load(Ordering::Acquire)) {
             if self.is_closed() {
                 return;
@@ -402,7 +402,7 @@ impl Hub {
                 Ok(Restored::Skipped) => {}
                 Ok(Restored::Moved { from }) => {
                     if let Some(from) = from.filter(|f| *f != node.index) {
-                        self.stale.insert((from, p.guild));
+                        self.mark_stale(from, p.guild);
                         self.emit(Event::PlayerMigrated {
                             guild: p.guild,
                             from,
@@ -415,6 +415,29 @@ impl Hub {
         }
     }
 
+    /// `guild` may still exist on node `idx` (moved away, or destroyed while
+    /// that node was unreachable): delete it there once the node is back with
+    /// the same session. If the node is already ready (it came back while the
+    /// move was in flight), clean up right away.
+    pub(crate) fn mark_stale(self: &Arc<Self>, idx: usize, guild: GuildId) {
+        self.stale.insert((idx, guild));
+        if !self.nodes.get(idx).is_some_and(|n| n.is_ready()) {
+            return; // cleanup_stale runs when it returns
+        }
+        let hub = self.clone();
+        tokio::spawn(async move {
+            hub.unless_closed(async {
+                // Whoever removes the pair does the cleanup (no double DELETE).
+                if hub.stale.remove(&(idx, guild)).is_some() {
+                    if let Some(node) = hub.nodes.get(idx) {
+                        hub.cleanup_one(node, guild).await;
+                    }
+                }
+            })
+            .await;
+        });
+    }
+
     /// An old node is back: remove players we migrated away from it.
     pub(crate) async fn cleanup_stale(&self, node: &Arc<Node>, resumed: bool) {
         let mine: Vec<GuildId> = self
@@ -424,22 +447,53 @@ impl Hub {
             .map(|e| e.1)
             .collect();
         for guild in mine {
-            self.stale.remove(&(node.index, guild));
+            if self.stale.remove(&(node.index, guild)).is_none() {
+                continue; // someone else is cleaning it up
+            }
             if !resumed {
                 continue; // the server forgot the player already
             }
-            let back_here = self
-                .players
-                .get(&guild)
-                .is_some_and(|p| p.node_index() == Some(node.index));
-            if back_here {
-                continue;
+            self.cleanup_one(node, guild).await;
+        }
+    }
+
+    /// DELETE `guild` on `node` unless the guild's player lives there now.
+    /// Checked and sent under that player's gate, so it cannot interleave with
+    /// a write (or a move back to `node`).
+    async fn cleanup_one(&self, node: &Arc<Node>, guild: GuildId) {
+        for _ in 0..8 {
+            let p = self.players.get(&guild).map(|e| e.value().clone());
+            let _gate = match &p {
+                Some(p) => Some(p.gate.lock().await),
+                None => None,
+            };
+            let now = self.players.get(&guild).map(|e| e.value().clone());
+            let unchanged = match (&p, &now) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            };
+            if !unchanged {
+                continue; // the guild got a new player while we waited: recheck
             }
-            if let Some(sid) = node.session_id() {
-                if let Err(e) = node.rest().destroy_player(&sid, guild).await {
-                    tracing::debug!(guild = %guild, error = %e, "stale player cleanup failed");
+            let back_here = p.as_ref().is_some_and(|p| {
+                !p.destroyed.load(Ordering::Acquire) && p.node_index() == Some(node.index)
+            });
+            if back_here || self.is_closed() {
+                return;
+            }
+            match node.session_id() {
+                Some(sid) if node.is_ready() => {
+                    if let Err(e) = node.rest().destroy_player(&sid, guild).await {
+                        tracing::debug!(guild = %guild, error = %e, "stale player cleanup failed");
+                    }
+                }
+                // Down again: retry when it comes back.
+                _ => {
+                    self.stale.insert((node.index, guild));
                 }
             }
+            return;
         }
     }
 }

@@ -214,35 +214,22 @@ impl Player {
     }
 
     /// `destroy` with the gate already held by the caller.
+    ///
+    /// The DELETE and the removal of the map entry run in their own task, so
+    /// they complete even if this future is dropped (the entry is removed only
+    /// after the DELETE, so no new player for the guild can overlap it).
     async fn destroy_locked(&self) -> Result<()> {
         self.inner.destroyed.store(true, Ordering::Release);
-        let guild = self.inner.guild;
-        let res = self.destroy_remote(guild).await;
-        // Forget local state only after the DELETE finished, so no new player
-        // (and gate) for this guild can overlap it.
-        self.hub
-            .players
-            .remove_if(&guild, |_, v| Arc::ptr_eq(v, &self.inner));
-        res
-    }
-
-    async fn destroy_remote(&self, guild: GuildId) -> Result<()> {
-        if self.hub.is_closed() {
-            return Err(Error::Closed);
-        }
-        let Some(node) = self.inner.node_index().and_then(|i| self.hub.nodes.get(i)) else {
-            return Ok(());
-        };
-        let Some(sid) = node.session_id() else {
-            return Ok(());
-        };
-        if !node.is_ready() {
-            return Ok(());
-        }
-        match node.rest().destroy_player(&sid, guild).await {
-            Err(Error::Lavalink { status: 404, .. }) => Ok(()),
-            r => r,
-        }
+        let hub = self.hub.clone();
+        let inner = self.inner.clone();
+        let task = tokio::spawn(async move {
+            let res = destroy_remote(&hub, &inner).await;
+            hub.players
+                .remove_if(&inner.guild, |_, v| Arc::ptr_eq(v, &inner));
+            res
+        });
+        // JoinError only when the runtime is shutting down.
+        task.await.unwrap_or(Err(Error::Closed))
     }
 
     /// Joins a voice channel through the configured `VoiceGateway`.
@@ -259,6 +246,35 @@ impl Player {
             .gateway
             .as_ref()
             .ok_or_else(|| Error::Config("no voice gateway configured".into()))
+    }
+}
+
+/// DELETE the player on its node. If the node cannot be reached now, the
+/// player is marked stale there and deleted once the node resumes.
+async fn destroy_remote(hub: &Arc<Hub>, p: &PlayerInner) -> Result<()> {
+    if hub.is_closed() {
+        return Err(Error::Closed);
+    }
+    let Some(idx) = p.node_index() else {
+        return Ok(()); // never sent anywhere
+    };
+    let Some(node) = hub.nodes.get(idx) else {
+        return Ok(());
+    };
+    let sid = match node.session_id() {
+        Some(sid) if node.is_ready() => sid,
+        _ => {
+            hub.mark_stale(idx, p.guild);
+            return Ok(());
+        }
+    };
+    match node.rest().destroy_player(&sid, p.guild).await {
+        Err(Error::Lavalink { status: 404, .. }) => Ok(()),
+        Err(e @ (Error::Http(_) | Error::HttpClient(_) | Error::Timeout)) => {
+            hub.mark_stale(idx, p.guild);
+            Err(e)
+        }
+        r => r,
     }
 }
 

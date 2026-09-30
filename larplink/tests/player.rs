@@ -232,3 +232,25 @@ async fn fetch_of_unknown_player_is_a_404() {
     let e = c.player(GuildId(42)).fetch().await.unwrap_err();
     assert!(matches!(e, Error::Lavalink { status: 404, .. }), "{e:?}");
 }
+
+/// I2: a `destroy()` future dropped mid-DELETE must still forget the player.
+#[tokio::test]
+async fn destroy_dropped_mid_delete_still_forgets_the_player() {
+    let mock = Mock::start().await;
+    let c = client(&[&mock]).await;
+    let p = c.player(GuildId(42));
+    p.play(&sample_track("ABC")).await.unwrap();
+    mock.state.delete_delay_ms.store(400, SeqCst);
+    let r = tokio::time::timeout(Duration::from_millis(100), p.destroy()).await;
+    assert!(r.is_err(), "destroy must still be in flight");
+    eventually(Duration::from_secs(5), || {
+        c.get_player(GuildId(42)).is_none()
+    })
+    .await;
+    assert_eq!(mock.requests_matching("DELETE", G).len(), 1);
+    mock.state.delete_delay_ms.store(0, SeqCst);
+    let q = c.player(GuildId(42));
+    q.play(&sample_track("DEF")).await.unwrap();
+    assert_eq!(&*q.track().unwrap().encoded, "DEF");
+    assert!(matches!(p.pause(true).await, Err(Error::PlayerNotFound)));
+}

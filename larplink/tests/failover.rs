@@ -321,3 +321,76 @@ async fn orphan_from_a_failed_migration_is_rescued_by_the_next_write() {
     assert!(matches!(e, Event::PlayerMigrated { from: 0, to: 1, .. }));
     assert_eq!(&*p.track().unwrap().encoded, "ABC");
 }
+
+/// I3: destroying a player while its node is down deletes it once the node
+/// comes back with the old session.
+#[tokio::test]
+async fn destroy_while_node_is_down_deletes_when_it_resumes() {
+    let mock = Mock::start().await;
+    let addr = mock.addr.to_string();
+    let c = client_with(&[&mock], |cfg| cfg.failover_grace = LONG).await;
+    let p = join_and_play(&c).await;
+    mock.kill();
+    eventually(LONG, || !c.nodes()[0].is_ready()).await;
+    p.destroy().await.unwrap();
+    assert!(c.get_player(GuildId(42)).is_none());
+    let back = Mock::start_on(&addr, true).await; // session (and player) survived
+    eventually(LONG, || !back.requests_matching("DELETE", G).is_empty()).await;
+    assert!(back.requests_matching("PATCH", G).is_empty());
+}
+
+/// M2: stale cleanup checks and deletes under the player's gate, so it
+/// cannot interleave with a write in flight.
+#[tokio::test]
+async fn stale_cleanup_waits_for_the_player_gate() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (a, b) = (Mock::start().await, Mock::start().await);
+    let a_addr = a.addr.to_string();
+    let c = client_with(&[&a, &b], |cfg| {
+        cfg.failover_grace = Duration::from_millis(300);
+        cfg.request_timeout = Duration::from_secs(10);
+    })
+    .await;
+    let p = join_and_play(&c).await;
+    let mut rx = c.events();
+    a.kill();
+    next_event(&mut rx, |e| matches!(e, Event::PlayerMigrated { .. })).await;
+    b.state.patch_delay_ms.store(2500, SeqCst);
+    let q = p.clone();
+    let w = tokio::spawn(async move { q.set_volume(9).await });
+    eventually(LONG, || b.state.in_flight.load(SeqCst) == 1).await;
+    let a2 = Mock::start_on(&a_addr, true).await;
+    eventually(LONG, || !a2.requests_matching("DELETE", G).is_empty()).await;
+    assert!(
+        w.is_finished(),
+        "stale DELETE was sent while a write held the player's gate"
+    );
+    w.await.unwrap().unwrap();
+    assert_eq!(p.node_index(), Some(1));
+}
+
+/// M3: a migration that completes after the old node already came back
+/// (resumed) must not leave the player running there too.
+#[tokio::test]
+async fn migration_finishing_after_the_old_node_resumed_cleans_it_up() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let (a, b) = (Mock::start().await, Mock::start().await);
+    let a_addr = a.addr.to_string();
+    let c = client_with(&[&a, &b], |cfg| {
+        cfg.failover_grace = Duration::from_millis(300);
+        cfg.request_timeout = Duration::from_secs(15);
+    })
+    .await;
+    let p = join_and_play(&c).await;
+    let mut rx = c.events();
+    b.state.patch_delay_ms.store(5000, SeqCst);
+    a.kill();
+    // Migration PATCH to b is in flight (slow) ...
+    eventually(LONG, || !b.requests_matching("PATCH", G).is_empty()).await;
+    // ... while node 0 comes back with its old session.
+    let a2 = Mock::start_on(&a_addr, true).await;
+    next_event(&mut rx, |e| matches!(e, Event::NodeConnected { node: 0 })).await;
+    next_event(&mut rx, |e| matches!(e, Event::PlayerMigrated { .. })).await;
+    assert_eq!(p.node_index(), Some(1));
+    eventually(LONG, || !a2.requests_matching("DELETE", G).is_empty()).await;
+}
