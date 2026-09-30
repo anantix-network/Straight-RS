@@ -29,6 +29,7 @@ type Log = Arc<Mutex<Vec<String>>>;
 enum Mode {
     Normal,
     FailStart,
+    FailEvent,
     PanicStart,
     PanicEvent,
     HangEvent,
@@ -82,6 +83,7 @@ impl WorkerPlugin for Handle {
         Box::pin(async move {
             self.0.events.lock().unwrap().push(format!("{event:?}"));
             match self.0.mode {
+                Mode::FailEvent => return Err(PluginError::new("event-secret-text")),
                 Mode::PanicEvent => panic!("event panic payload"),
                 Mode::HangEvent => std::future::pending().await,
                 Mode::BlockEvent => self.0.release.notified().await,
@@ -351,6 +353,62 @@ async fn panicking_plugin_is_unhealthy_and_isolated() {
     .await;
     assert_eq!(status_of(&worker, "good"), PluginStatus::Healthy);
     assert!(worker.status().ready);
+}
+
+#[tokio::test]
+async fn event_hook_error_marks_only_that_plugin_unhealthy_and_is_reported() {
+    let mock = MockLavalink::start().await;
+    let log: Log = Arc::default();
+    let (bad, _) = Recorder::new("bad", Mode::FailEvent, &log);
+    let (good, good_events) = Recorder::new("good", Mode::Normal, &log);
+    let worker = ready_worker(&mock, config(&mock), vec![(bad, true), (good, true)]).await;
+
+    mock.push_track_end(1, "enc-first", "finished");
+    wait_for("event-hook failure", || {
+        status_of(&worker, "bad") == PluginStatus::Unhealthy
+    })
+    .await;
+    mock.push_track_end(1, "enc-second", "finished");
+    wait_for("healthy plugin continues receiving events", || {
+        good_events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.contains("TrackEnd"))
+            .count()
+            >= 2
+    })
+    .await;
+
+    assert_eq!(status_of(&worker, "bad"), PluginStatus::Unhealthy);
+    assert_eq!(status_of(&worker, "good"), PluginStatus::Healthy);
+    assert!(
+        worker.status().ready,
+        "event error must not stop the worker"
+    );
+
+    let response = worker
+        .router()
+        .oneshot(
+            Request::get("/healthz")
+                .header("authorization", format!("Bearer {TOKEN}"))
+                .extension(ConnectInfo(
+                    "127.0.0.1:12345".parse::<SocketAddr>().unwrap(),
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(!text.contains("event-secret-text"), "{text}");
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["plugins"][0]["status"], "unhealthy");
+    assert_eq!(json["plugins"][1]["status"], "healthy");
 }
 
 #[tokio::test]

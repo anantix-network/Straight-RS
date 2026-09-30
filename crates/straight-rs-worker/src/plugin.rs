@@ -4,8 +4,8 @@
 //! [`WorkerBuilder::plugin`](crate::WorkerBuilder::plugin) /
 //! [`optional_plugin`](crate::WorkerBuilder::optional_plugin). Each plugin has its own
 //! bounded event queue and supervisor task, and every callback runs in its own spawned
-//! task under `config.callback_timeout`. A panic or timeout marks only that plugin
-//! [`PluginStatus::Unhealthy`] (sticky, never retried). A full queue drops the event,
+//! task under `config.callback_timeout`. A panic, timeout, cancellation, or hook error marks
+//! only that plugin [`PluginStatus::Unhealthy`] (sticky, never retried). A full queue drops the event,
 //! counts it and marks that plugin [`PluginStatus::Lagged`]; the Gateway/Lavalink relay
 //! never blocks.
 //!
@@ -23,9 +23,9 @@
 //! session id, raw `Player` or `LavalinkClient`. `WorkerContext::load` returns the node's
 //! `LoadResult` as-is, so its tracks *do* carry `plugin_info`/`user_data` as supplied by
 //! Lavalink. Errors from `PluginPlayer` and `load` carry only a static category (no REST
-//! path, session id or provider text). Errors returned from `on_event` are discarded;
-//! errors from `on_start` fail a required plugin's startup. Error text and panic payloads
-//! are never exposed via `/healthz`.
+//! path, session id or provider text). Errors returned from `on_event` mark that plugin
+//! unhealthy using a static reason; the event hook is not retried. Errors from `on_start`
+//! fail a required plugin's startup. Error text and panic payloads are never exposed via `/healthz`.
 //!
 //! Plugins remain trusted in-process code (they can spawn tasks, read the process
 //! environment and open sockets): `PluginPlayer` narrows the *API* handed to them, it is
@@ -674,7 +674,7 @@ async fn supervise(
         };
         if matches!(
             outcome,
-            Outcome::Panicked | Outcome::TimedOut | Outcome::Cancelled
+            Outcome::Failed | Outcome::Panicked | Outcome::TimedOut | Outcome::Cancelled
         ) {
             // Sticky; never retried. Dropping `rx` makes further dispatch a no-op.
             slot.mark_unhealthy(outcome.reason());
