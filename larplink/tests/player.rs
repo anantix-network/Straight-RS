@@ -147,3 +147,35 @@ async fn join_without_gateway_is_a_config_error() {
     let e = c.player(GuildId(1)).join(larplink::ChannelId(2)).await.unwrap_err();
     assert!(matches!(e, Error::Config(_)));
 }
+
+#[tokio::test]
+async fn write_queued_behind_destroy_fails_and_does_not_recreate() {
+    let mock = Mock::start().await;
+    let c = client(&[&mock]).await;
+    let p = c.player(GuildId(42));
+    p.play(&sample_track("ABC")).await.unwrap();
+    mock.state.delete_delay_ms.store(200, SeqCst);
+    let (a, b) = (p.clone(), p.clone());
+    let d = tokio::spawn(async move { a.destroy().await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let w = tokio::spawn(async move { b.set_volume(7).await });
+    d.await.unwrap();
+    let e = w.await.unwrap().unwrap_err();
+    assert!(matches!(e, Error::PlayerNotFound));
+    let reqs = mock.requests_matching("PATCH", G);
+    assert_eq!(reqs.len(), 1, "no PATCH after DELETE");
+    assert_eq!(mock.requests_matching("DELETE", G).len(), 1);
+}
+
+#[tokio::test]
+async fn player_after_destroy_is_fresh_and_works() {
+    let mock = Mock::start().await;
+    let c = client(&[&mock]).await;
+    let p = c.player(GuildId(42));
+    p.play(&sample_track("ABC")).await.unwrap();
+    p.destroy().await.unwrap();
+    let q = c.player(GuildId(42));
+    q.play(&sample_track("DEF")).await.unwrap();
+    assert_eq!(&*q.track().unwrap().encoded, "DEF");
+    assert!(matches!(p.pause(true).await, Err(Error::PlayerNotFound)));
+}

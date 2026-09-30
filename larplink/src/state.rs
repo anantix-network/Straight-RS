@@ -53,6 +53,8 @@ pub(crate) struct PlayerInner {
     pub(crate) guild: GuildId,
     node: AtomicUsize,
     pub(crate) orphaned: AtomicBool,
+    /// Set by `Player::destroy`; further writes fail with `PlayerNotFound`.
+    pub(crate) destroyed: AtomicBool,
     snapshot: ArcSwap<PlayerSnapshot>,
     pub(crate) voice: Mutex<VoiceAssembler>,
     /// Fair FIFO gate: at most one in-flight write per guild, in call order.
@@ -65,6 +67,7 @@ impl PlayerInner {
             guild,
             node: AtomicUsize::new(NO_NODE),
             orphaned: AtomicBool::new(false),
+            destroyed: AtomicBool::new(false),
             snapshot: ArcSwap::from_pointee(PlayerSnapshot::default()),
             voice: Mutex::new(VoiceAssembler::default()),
             gate: tokio::sync::Mutex::new(()),

@@ -1,6 +1,7 @@
 use crate::hub::Hub;
 use crate::state::{PlayerInner, PlayerSnapshot};
 use crate::{ChannelId, Error, Event, Filters, GuildId, LavalinkClient, Result, Track, UpdatePlayer, UpdateTrack};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
@@ -69,6 +70,9 @@ impl Player {
     /// `no_replace = true` keeps the current track if one is playing.
     pub async fn update_with(&self, upd: UpdatePlayer, no_replace: bool) -> Result<()> {
         let _gate = self.inner.gate.lock().await;
+        if self.inner.destroyed.load(Ordering::Acquire) {
+            return Err(Error::PlayerNotFound);
+        }
         let node = self.hub.node_for(&self.inner)?;
         let sid = node.session_id().ok_or(Error::NoNode)?;
         let resp = node.rest().update_player(&sid, self.inner.guild, &upd, no_replace).await?;
@@ -111,10 +115,21 @@ impl Player {
     }
 
     /// Destroys the player on its node and forgets local state. A 404 is not an error.
+    ///
+    /// Handles to a destroyed player return `Error::PlayerNotFound` on further writes;
+    /// call `LavalinkClient::player` again for a fresh one.
     pub async fn destroy(&self) -> Result<()> {
         let _gate = self.inner.gate.lock().await;
+        self.inner.destroyed.store(true, Ordering::Release);
         let guild = self.inner.guild;
+        let res = self.destroy_remote(guild).await;
+        // Forget local state only after the DELETE finished, so no new player
+        // (and gate) for this guild can overlap it.
         self.hub.players.remove_if(&guild, |_, v| Arc::ptr_eq(v, &self.inner));
+        res
+    }
+
+    async fn destroy_remote(&self, guild: GuildId) -> Result<()> {
         let Some(node) = self.inner.node_index().and_then(|i| self.hub.nodes.get(i)) else {
             return Ok(());
         };

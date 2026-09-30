@@ -37,6 +37,7 @@ pub struct MockState {
     pub load_response: Mutex<Option<(u16, String)>>,
     pub fail_next_gets: AtomicU32,
     pub patch_delay_ms: AtomicU32,
+    pub delete_delay_ms: AtomicU32,
     pub in_flight: AtomicU32,
     pub max_in_flight: AtomicU32,
     players: Mutex<HashMap<String, Value>>,
@@ -72,6 +73,7 @@ impl Mock {
             load_response: Mutex::new(None),
             fail_next_gets: AtomicU32::new(0),
             patch_delay_ms: AtomicU32::new(0),
+            delete_delay_ms: AtomicU32::new(0),
             in_flight: AtomicU32::new(0),
             max_in_flight: AtomicU32::new(0),
             players: Mutex::new(HashMap::new()),
@@ -221,6 +223,10 @@ async fn rest_handler(State(s): State<Arc<MockState>>, method: Method, uri: Uri,
             Json(out).into_response()
         }
         ("DELETE", ["v4", "sessions", _, "players", gid]) => {
+            let delay = s.delete_delay_ms.load(SeqCst);
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_millis(u64::from(delay))).await;
+            }
             s.players.lock().unwrap().remove(*gid);
             StatusCode::NO_CONTENT.into_response()
         }
