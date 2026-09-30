@@ -103,19 +103,26 @@ async fn readiness_requires_gateway_and_lavalink_ready() {
 }
 
 #[tokio::test]
-async fn readiness_waits_for_gateway_ready_event() {
+async fn build_waits_for_gateway_ready_before_returning() {
     let lavalink = mock_lavalink::MockLavalink::start().await;
     let gateway = fake_gateway::ControlledGateway::withheld_ready();
     let ready = gateway.ready.clone();
-    let mut worker = WorkerBuilder::new(config(lavalink.host()), gateway)
-        .build()
-        .await
-        .unwrap();
-    wait_lavalink_ready(&worker, true).await;
-    wait_gateway_ready(&worker, false).await;
-    assert!(!worker.status().ready);
+    let host = lavalink.host();
+    let mut build =
+        tokio::spawn(async move { WorkerBuilder::new(config(host), gateway).build().await });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut build)
+            .await
+            .is_err()
+    );
     ready.send(GatewayEvent::Ready).unwrap();
-    wait_ready(&worker).await;
+    let mut worker = tokio::time::timeout(Duration::from_secs(3), build)
+        .await
+        .expect("worker build did not resume after Gateway became ready")
+        .unwrap()
+        .unwrap();
+    assert!(worker.status().gateway_ready);
     worker.shutdown().await.unwrap();
 }
 

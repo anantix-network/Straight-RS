@@ -25,6 +25,7 @@ pub struct MockLavalink {
     addr: SocketAddr,
     requests: Arc<Mutex<Vec<Recorded>>>,
     _task: tokio::task::JoinHandle<()>,
+    #[allow(dead_code)] // This shared mock is compiled separately by each integration test.
     ready_release: tokio::sync::watch::Sender<bool>,
     #[allow(dead_code)]
     load_body: Arc<Mutex<Value>>,
@@ -48,6 +49,7 @@ impl MockLavalink {
     pub async fn start() -> Self {
         Self::start_inner(false).await
     }
+    #[allow(dead_code)] // Not every integration test target exercises a delayed handshake.
     pub async fn start_paused() -> Self {
         Self::start_inner(true).await
     }
@@ -155,6 +157,7 @@ impl MockLavalink {
     pub fn set_load_body(&self, body: Value) {
         *self.load_body.lock().unwrap() = body;
     }
+    #[allow(dead_code)] // Not every integration test target exercises a delayed handshake.
     pub fn release_ready(&self) -> tokio::sync::watch::Sender<bool> {
         self.ready_release.clone()
     }

@@ -265,18 +265,21 @@ async fn auth_error_body_and_debug_omit_the_synthetic_api_token() {
 }
 
 #[tokio::test]
-async fn readyz_is_503_when_only_gateway_is_unready_then_200() {
-    let gateway = ControlledGateway::withheld_ready();
-    let ready = gateway.ready.clone();
+async fn readyz_tracks_gateway_disconnect_and_resume() {
+    let gateway = ControlledGateway::new(false);
+    let events = gateway.events.clone();
     let h = app_with(gateway, MockLavalink::start().await).await;
+    wait_ready(&h).await;
+    events
+        .send(straight_rs_worker::GatewayEvent::Disconnected)
+        .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        while !h.worker.status().lavalink_ready {
+        while h.worker.status().gateway_ready {
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
-    assert!(!h.worker.status().gateway_ready);
     let (status, text) = call(&h, "/readyz", "").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{text}");
     let json: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -284,7 +287,9 @@ async fn readyz_is_503_when_only_gateway_is_unready_then_200() {
         json["error"]["code"].is_string() && json["error"]["message"].is_string(),
         "{text}"
     );
-    ready.send(straight_rs_worker::GatewayEvent::Ready).unwrap();
+    events
+        .send(straight_rs_worker::GatewayEvent::Ready)
+        .unwrap();
     wait_ready(&h).await;
     let (status, _) = call(&h, "/readyz", "").await;
     assert_eq!(status, StatusCode::OK);

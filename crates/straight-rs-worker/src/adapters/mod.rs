@@ -1,3 +1,4 @@
+#[cfg(feature = "serenity")]
 pub mod serenity;
 pub mod twilight;
 

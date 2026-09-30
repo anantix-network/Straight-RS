@@ -177,13 +177,13 @@ async fn run(gateway: impl straight_rs_worker::GatewayDriver) -> Result<(), Box<
 ```
 
 Install the Git `serenity` feature to compile the optional Serenity dependency
-and Straight-RS voice-event adapter. **The worker's current
-`SerenityGatewayDriver` is a stub that returns “Serenity adapter is not
-implemented”; it is not a functioning production Gateway driver.** The worker
-runtime requires a functioning `GatewayDriver` implementation to provide the
-bot Gateway session and voice operations. Do not treat enabling the feature or
-building the `worker-serenity` example as proof that a usable Gateway driver is
-available.
+and the worker's Serenity Gateway driver. The driver owns the bot Gateway
+session, forwards voice-state and voice-server updates, and submits voice join
+and leave commands through that session. The worker waits for Gateway readiness
+before reporting ready. Build and automated adapter tests do not prove that a
+deployment can authenticate or maintain a live Discord Gateway connection;
+validate those credentials, intents, and network access in the target
+environment.
 
 Register plugins statically before building the worker:
 

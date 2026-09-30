@@ -31,7 +31,7 @@ Tests (tests/plugins.rs 7 -> 16, mock_lavalink: recorded query, fail_player_upda
 
 # Task 5 FIX ROUND 3 — event-hook error health reporting
 
-Status: implementation complete; signed commit pending.
+Status: DONE. Signed commit e51463a6e1956488899f2fa070c0b0ed0a64a3c1 (`fix(worker): report plugin event hook failures`); signature verified. Scoped spec and quality re-reviews both passed with no actionable findings.
 
 - `tests/plugins.rs`: added `FailEvent` and `event_hook_error_marks_only_that_plugin_unhealthy_and_is_reported`. The test verifies a failed event hook makes only that plugin unhealthy, subsequent events still reach the healthy plugin, worker readiness remains true, `/healthz` shows both plugin statuses, and the plugin error text is absent.
 - `plugin.rs`: event-hook failures now use the existing static `"failed"` reason through `mark_unhealthy`; no `PluginError` text is surfaced. Module docs describe sticky unhealthy status and no retry.

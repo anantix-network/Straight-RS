@@ -28,9 +28,12 @@ const GUILD_ID: &str = "424242";
 const CHANNEL_ID: &str = "313131";
 const TRACK_IDENTIFIER: &str = "synthetic:process-test-track";
 
+type VoiceJoinCall = (GuildId, Option<ChannelId>);
+type VoiceJoinCalls = Arc<Mutex<Vec<VoiceJoinCall>>>;
+
 #[derive(Clone, Default)]
 struct VoiceGateway {
-    joins: Arc<Mutex<Vec<(GuildId, Option<ChannelId>)>>>,
+    joins: VoiceJoinCalls,
 }
 
 impl GatewayDriver for VoiceGateway {
