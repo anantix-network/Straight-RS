@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["larplink-model"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+thiserror = "1"
+tracing = "0.1"
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net"] }
+tokio-tungstenite = "0.24"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+hyper = { version = "1", features = ["http1", "client"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+dashmap = "6"
+arc-swap = "1"
+percent-encoding = "2"
+rand = "0.8"
+larplink-model = { path = "larplink-model", version = "0.1.0" }
