@@ -24,11 +24,25 @@ it does not keep a dead application process alive.
 
 Straight-RS is not on crates.io yet, so add it from GitHub:
 
+Install either client package from the repository's `main` branch:
+
 ```toml
 [dependencies]
-straight-rs = { git = "https://github.com/anantix-network/Straight-RS" }
+straight-rs = { git = "https://github.com/anantix-network/Straight-RS", branch = "main" }
 tokio = { version = "1", features = ["full"] }
 ```
+
+For a standalone playback worker, use the separate `straight-rs-worker` crate
+and select the Discord adapter feature your deployment needs:
+
+```toml
+straight-rs-worker = { git = "https://github.com/anantix-network/Straight-RS", branch = "main", features = ["serenity"] }
+```
+
+The worker owns the Lavalink client and Discord Gateway session, exposes an
+authenticated HTTP control API, and supports startup plugins. See
+[`Separate playback worker`](#separate-playback-worker) for deployment and
+process-lifecycle requirements.
 
 Optional features:
 
