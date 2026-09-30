@@ -66,13 +66,15 @@ impl<D: GatewayDriver> WorkerBuilder<D> {
         let relay_ready = gateway_ready.clone();
         let relay_degraded = degraded.clone();
         let relay_lagged = lagged.clone();
+        let relay_bot_id = bot_user_id;
         let relay_task = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     event = gateway_rx.recv() => match event {
                         Some(GatewayEvent::Ready) => relay_ready.store(true, Ordering::Release),
                         Some(GatewayEvent::Disconnected) => relay_ready.store(false, Ordering::Release),
-                        Some(GatewayEvent::VoiceState { guild, update }) => { relay_voice.update(guild, update.channel_id); if relay_client.voice_state_update(guild, update).await.is_err() { relay_degraded.store(true, Ordering::Release); } }
+                        Some(GatewayEvent::VoiceState { user_id, guild, update }) if user_id == relay_bot_id => { relay_voice.update(guild, update.channel_id); if relay_client.voice_state_update(guild, update).await.is_err() { relay_degraded.store(true, Ordering::Release); } }
+                        Some(GatewayEvent::VoiceState { .. }) => {}
                         Some(GatewayEvent::VoiceServer { guild, update }) => { if relay_client.voice_server_update(guild, update).await.is_err() { relay_degraded.store(true, Ordering::Release); } }
                         None => { relay_degraded.store(true, Ordering::Release); break; }
                     },
@@ -105,6 +107,7 @@ impl<D: GatewayDriver> WorkerBuilder<D> {
 pub struct RunningWorker {
     client: Option<LavalinkClient>,
     status: StatusState,
+    #[allow(dead_code)]
     voice: VoiceStateStore,
     gateway_shutdown: Option<watch::Sender<bool>>,
     gateway_task: Option<JoinHandle<WorkerResult<()>>>,
@@ -119,17 +122,21 @@ impl RunningWorker {
     pub fn status(&self) -> WorkerStatus {
         self.status.snapshot()
     }
-    pub fn voice_channel(&self, guild: straight_rs::GuildId) -> Option<straight_rs::ChannelId> {
+    #[allow(dead_code)]
+    pub(crate) fn voice_channel(
+        &self,
+        guild: straight_rs::GuildId,
+    ) -> Option<straight_rs::ChannelId> {
         self.voice.channel(guild)
     }
-    pub async fn serve(&self, shutdown: watch::Receiver<bool>) -> WorkerResult<()> {
+    pub async fn serve(&mut self, shutdown: watch::Receiver<bool>) -> WorkerResult<()> {
         let listener = TcpListener::bind(self.bind_addr)
             .await
             .map_err(|e| WorkerError::Gateway(e.to_string()))?;
         self.serve_on(listener, shutdown).await
     }
     pub async fn serve_on(
-        &self,
+        &mut self,
         listener: TcpListener,
         mut shutdown: watch::Receiver<bool>,
     ) -> WorkerResult<()> {
@@ -142,7 +149,8 @@ impl RunningWorker {
             let _ = shutdown.wait_for(|v| *v).await;
         })
         .await
-        .map_err(|e| WorkerError::Gateway(e.to_string()))
+        .map_err(|e| WorkerError::Gateway(e.to_string()))?;
+        self.shutdown().await
     }
     pub async fn shutdown(&mut self) -> WorkerResult<()> {
         if let Some(tx) = self.gateway_shutdown.take() {
@@ -152,13 +160,16 @@ impl RunningWorker {
             client.shutdown();
         }
         let deadline = tokio::time::Instant::now() + self.shutdown_timeout;
+        let mut failure = None;
         if let Some(mut task) = self.gateway_task.take() {
             match tokio::time::timeout_at(deadline, &mut task).await {
-                Ok(result) => result.map_err(|e| WorkerError::Gateway(e.to_string()))??,
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(e))) => failure = Some(e),
+                Ok(Err(e)) => failure = Some(WorkerError::Gateway(e.to_string())),
                 Err(_) => {
                     task.abort();
                     let _ = task.await;
-                    return Err(WorkerError::Gateway(
+                    failure = Some(WorkerError::Gateway(
                         "gateway shutdown deadline elapsed".into(),
                     ));
                 }
@@ -166,17 +177,24 @@ impl RunningWorker {
         }
         if let Some(mut task) = self.relay_task.take() {
             match tokio::time::timeout_at(deadline, &mut task).await {
-                Ok(result) => result.map_err(|e| WorkerError::Gateway(e.to_string()))?,
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    if failure.is_none() {
+                        failure = Some(WorkerError::Gateway(e.to_string()));
+                    }
+                }
                 Err(_) => {
                     task.abort();
                     let _ = task.await;
-                    return Err(WorkerError::Gateway(
-                        "event relay shutdown deadline elapsed".into(),
-                    ));
+                    if failure.is_none() {
+                        failure = Some(WorkerError::Gateway(
+                            "event relay shutdown deadline elapsed".into(),
+                        ));
+                    }
                 }
             }
         }
-        Ok(())
+        failure.map_or(Ok(()), Err)
     }
 }
 impl Drop for RunningWorker {

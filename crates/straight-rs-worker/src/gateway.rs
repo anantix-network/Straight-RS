@@ -18,6 +18,7 @@ pub enum GatewayCommand {
 }
 pub enum GatewayEvent {
     VoiceState {
+        user_id: UserId,
         guild: GuildId,
         update: VoiceStateUpdate,
     },

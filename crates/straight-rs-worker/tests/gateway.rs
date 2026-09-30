@@ -90,7 +90,7 @@ async fn gateway_run_relays_voice_state_event_to_receiver() {
         .expect("voice-state event deadline elapsed")
         .expect("driver closed event channel");
     assert!(
-        matches!(event, GatewayEvent::VoiceState { guild: GuildId(4), update } if update.channel_id == Some(ChannelId(5)))
+        matches!(event, GatewayEvent::VoiceState { user_id: straight_rs::UserId(9), guild: GuildId(4), update } if update.channel_id == Some(ChannelId(5)))
     );
     drop(commands_tx);
     driver_task.abort();
@@ -119,6 +119,7 @@ async fn gateway_timeout_returns_gateway_error_variant() {
 #[test]
 fn voice_event_contains_update() {
     let event = GatewayEvent::VoiceState {
+        user_id: straight_rs::UserId(9),
         guild: GuildId(4),
         update: straight_rs::VoiceStateUpdate {
             channel_id: Some(ChannelId(5)),

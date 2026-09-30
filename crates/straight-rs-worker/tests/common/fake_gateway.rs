@@ -39,6 +39,7 @@ impl GatewayDriver for FakeGateway {
 
 pub fn voice_state(guild: GuildId, channel: Option<ChannelId>) -> GatewayEvent {
     GatewayEvent::VoiceState {
+        user_id: UserId(9),
         guild,
         update: VoiceStateUpdate {
             channel_id: channel,
