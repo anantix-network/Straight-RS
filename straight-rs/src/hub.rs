@@ -1,12 +1,12 @@
-use crate::balancer::{pick, NodeView, Strategy};
+use crate::balancer::{NodeView, Strategy, pick};
 use crate::node::Node;
-use crate::state::{lock, PlayerInner};
+use crate::state::{PlayerInner, lock};
 use crate::{Error, Event, Result, TrackEndReason, VoiceGateway};
 use dashmap::{DashMap, DashSet};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use straight_rs_model::{GuildId, UserId, WsMessage};
-use tokio::sync::{broadcast, watch, Notify};
+use tokio::sync::{Notify, broadcast, watch};
 
 /// State a player must still be in (checked under its gate) for `restore_to` to act.
 #[derive(Clone, Copy)]
@@ -252,10 +252,10 @@ impl Hub {
                     if p.node_index().is_some_and(|i| i != node.index) {
                         return; // stale event from a node the player left
                     }
-                    if let straight_rs_model::Event::TrackEnd { track, reason, .. } = &ev {
-                        if *reason != TrackEndReason::Replaced {
-                            p.clear_track_if(&track.encoded);
-                        }
+                    if let straight_rs_model::Event::TrackEnd { track, reason, .. } = &ev
+                        && *reason != TrackEndReason::Replaced
+                    {
+                        p.clear_track_if(&track.encoded);
                     }
                 }
                 self.emit(Event::from_model(node.index, ev));
@@ -284,21 +284,21 @@ impl Hub {
             return Ok(Restored::Skipped);
         }
         let from = p.node_index();
-        let gen = node.session_gen();
+        let generation = node.session_gen();
         // Skip the PATCH when this session already has the player (a user
         // write rebuilt it first, or the session survived).
-        if !p.written_on(node.index, gen) {
-            if let Some(upd) = p.restore_payload() {
-                let sid = node.session_id().ok_or(Error::NoNode)?;
-                let resp = node
-                    .rest()
-                    .update_player(&sid, p.guild, &upd, false)
-                    .await?;
-                p.apply_player(resp);
-                p.mark_written(node.index, gen);
-                if let Some(vs) = upd.voice {
-                    lock(&p.voice).mark_sent(vs);
-                }
+        if !p.written_on(node.index, generation)
+            && let Some(upd) = p.restore_payload()
+        {
+            let sid = node.session_id().ok_or(Error::NoNode)?;
+            let resp = node
+                .rest()
+                .update_player(&sid, p.guild, &upd, false)
+                .await?;
+            p.apply_player(resp);
+            p.mark_written(node.index, generation);
+            if let Some(vs) = upd.voice {
+                lock(&p.voice).mark_sent(vs);
             }
         }
         p.set_node(node.index);
@@ -428,10 +428,10 @@ impl Hub {
         tokio::spawn(async move {
             hub.unless_closed(async {
                 // Whoever removes the pair does the cleanup (no double DELETE).
-                if hub.stale.remove(&(idx, guild)).is_some() {
-                    if let Some(node) = hub.nodes.get(idx) {
-                        hub.cleanup_one(node, guild).await;
-                    }
+                if hub.stale.remove(&(idx, guild)).is_some()
+                    && let Some(node) = hub.nodes.get(idx)
+                {
+                    hub.cleanup_one(node, guild).await;
                 }
             })
             .await;

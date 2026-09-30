@@ -43,10 +43,10 @@ async fn main() -> straight_rs::Result<()> {
         )
         .await?;
 
-    if let LoadResult::Search(tracks) = client.load("ytsearch:never gonna give you up").await? {
-        if let Some(track) = tracks.first() {
-            client.player(guild_id).play(track).await?;
-        }
+    if let LoadResult::Search(tracks) = client.load("ytsearch:never gonna give you up").await?
+        && let Some(track) = tracks.first()
+    {
+        client.player(guild_id).play(track).await?;
     }
     let mut events = client.events();
     while let Ok(event) = events.recv().await {

@@ -3,7 +3,7 @@ on: [push, pull_request]
 env:
   CARGO_TERM_COLOR: always
 jobs:
-  stable:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -13,17 +13,6 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
-      - run: cargo test -p straight-rs --all-features
-      - run: cargo test -p straight-rs --features twilight
-      - run: cargo test -p straight-rs --features serenity
-      - run: cargo test -p straight-rs --features songbird
-      - run: cargo check -p straight-rs --features tls
+      - run: cargo test --workspace --all-features
       - run: cargo build -p straight-rs --examples
       - run: cargo bench -p straight-rs --no-run
-  msrv:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.80
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --locked

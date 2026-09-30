@@ -9,7 +9,7 @@ pub fn connection_info(info: &ConnectionInfo) -> (GuildId, VoiceState) {
             token: info.token.clone(),
             endpoint: info.endpoint.clone(),
             session_id: info.session_id.clone(),
-            channel_id: info.channel_id.map(|c| ChannelId(c.0.get())),
+            channel_id: Some(ChannelId(info.channel_id.0.get())),
         },
     )
 }
@@ -23,7 +23,7 @@ mod tests {
         use std::num::NonZeroU64;
         let n = |v| NonZeroU64::new(v).unwrap();
         let info = ::songbird::ConnectionInfo {
-            channel_id: Some(SbChannel::from(n(9))),
+            channel_id: SbChannel::from(n(9)),
             endpoint: "e:443".into(),
             guild_id: SbGuild::from(n(100)),
             session_id: "sess".into(),

@@ -1,12 +1,12 @@
 use crate::hub::{Hub, Route};
-use crate::state::{lock, PlayerInner, PlayerSnapshot};
+use crate::state::{PlayerInner, PlayerSnapshot, lock};
 use crate::voice::VoiceAssembler;
 use crate::{
     ChannelId, Error, Event, Filters, GuildId, LavalinkClient, Result, Track, UpdatePlayer,
     UpdateTrack, VoiceOutcome, VoiceServerUpdate, VoiceState, VoiceStateUpdate,
 };
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -131,15 +131,15 @@ impl Player {
             Route::Stay(n) => (n, false),
             Route::Move(n) => (n, true),
         };
-        let gen = node.session_gen();
+        let generation = node.session_gen();
         let sid = node.session_id().ok_or(Error::NoNode)?;
-        let upd = self.inner.prepare(upd, node.index, gen);
+        let upd = self.inner.prepare(upd, node.index, generation);
         let resp = node
             .rest()
             .update_player(&sid, self.inner.guild, &upd, no_replace)
             .await?;
         self.inner.apply_player(resp);
-        self.inner.mark_written(node.index, gen);
+        self.inner.mark_written(node.index, generation);
         if let Some(vs) = upd.voice {
             // Only after success, so a failed PATCH is retried by the next
             // identical update (or the next write).

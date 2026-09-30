@@ -86,22 +86,22 @@ impl PlayerInner {
     }
 
     /// Whether the node's current session already has this player's state.
-    pub(crate) fn written_on(&self, node: usize, gen: u64) -> bool {
-        *lock(&self.written) == Some((node, gen))
+    pub(crate) fn written_on(&self, node: usize, generation: u64) -> bool {
+        *lock(&self.written) == Some((node, generation))
     }
 
-    pub(crate) fn mark_written(&self, node: usize, gen: u64) {
-        *lock(&self.written) = Some((node, gen));
+    pub(crate) fn mark_written(&self, node: usize, generation: u64) {
+        *lock(&self.written) = Some((node, generation));
     }
 
-    /// Completes a user write bound for `node`'s session `gen`: if the player
+    /// Completes a user write bound for `node`'s session `generation`: if the player
     /// was last written on another node or session (lost session, move), the
     /// restore state is merged in (the caller's fields win), and a voice state
     /// the node does not have yet rides along.
-    pub(crate) fn prepare(&self, upd: UpdatePlayer, node: usize, gen: u64) -> UpdatePlayer {
+    pub(crate) fn prepare(&self, upd: UpdatePlayer, node: usize, generation: u64) -> UpdatePlayer {
         let written = *lock(&self.written);
         let mut upd = match (written, self.restore_payload()) {
-            (Some(w), Some(base)) if w != (node, gen) => merge(upd, base),
+            (Some(w), Some(base)) if w != (node, generation) => merge(upd, base),
             _ => upd,
         };
         if upd.voice.is_none() {

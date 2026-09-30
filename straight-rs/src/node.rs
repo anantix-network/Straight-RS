@@ -5,16 +5,16 @@ use crate::rest::RestClient;
 use crate::{Error, Event, NodeConfig, Result};
 use arc_swap::ArcSwapOption;
 use futures_util::{SinkExt, StreamExt};
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering::*};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering::*};
 use std::time::Duration;
 use straight_rs_model::{Info, RoutePlannerStatus, SessionUpdate, Stats, WsMessage};
 use tokio::sync::OnceCell;
 use tokio::time::Instant;
 use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
-use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeStatus {
@@ -209,7 +209,7 @@ impl Node {
                     // A peer that stops reading must not wedge us here.
                     tokio::time::timeout(
                         self.cfg.ping_timeout,
-                        write.send(Message::Ping(Vec::new())),
+                        write.send(Message::Ping(Default::default())),
                     )
                     .await
                     .map_err(|_| Error::Timeout)??;

@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [features]
 default = []
@@ -34,13 +35,13 @@ rand.workspace = true
 hyper-rustls = { version = "0.27", optional = true, default-features = false, features = ["http1", "ring", "webpki-tokio"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std"] }
 serenity = { version = "0.12", optional = true, default-features = false, features = ["model", "rustls_backend"] }
-twilight-model = { version = "0.16", optional = true }
-songbird = { version = "0.4", optional = true, default-features = false }
+twilight-model = { version = "0.17", optional = true }
+songbird = { version = "0.6", optional = true, default-features = false }
 
 [dev-dependencies]
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.8", features = ["ws"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
-criterion = "0.5"
+criterion = "0.8"
 
 [[bench]]
 name = "core"

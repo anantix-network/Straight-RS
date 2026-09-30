@@ -11,10 +11,12 @@ async fn connects_with_auth_headers_and_enables_resume() {
     let h = mock.state.ws_headers.lock().unwrap()[0].clone();
     assert_eq!(h["authorization"].to_str().unwrap(), "pw");
     assert_eq!(h["user-id"].to_str().unwrap(), "1");
-    assert!(h["client-name"]
-        .to_str()
-        .unwrap()
-        .starts_with("straight-rs/"));
+    assert!(
+        h["client-name"]
+            .to_str()
+            .unwrap()
+            .starts_with("straight-rs/")
+    );
     assert!(h.get("session-id").is_none());
     assert_eq!(c.nodes()[0].session_id().unwrap().as_str(), "mock-session");
     eventually(Duration::from_secs(5), || {

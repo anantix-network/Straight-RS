@@ -1,151 +1,248 @@
 # Straight-RS
 
-A fast, complete [Lavalink v4](https://lavalink.dev) client for Rust. It is
-library-agnostic: it talks to Lavalink over REST and WebSocket and never depends
-on a particular Discord library. Optional adapters convert serenity, twilight and
-songbird voice types into Straight-RS's inputs.
+A fast, easy-to-use **[Lavalink v4](https://lavalink.dev) client for Rust.**
 
-Workspace crates: `straight-rs` (the client) and `straight-rs-model` (all protocol
-payloads, re-exported as `straight_rs::model`).
+Lavalink is a standalone audio server for Discord bots. Straight-RS is the
+part that lives in your bot: it connects to one or more Lavalink servers,
+loads tracks, controls playback, and keeps everything running when a server
+restarts or drops.
+
+- **Works with any Discord library.** Nothing is tied to serenity, twilight or
+  songbird. Small optional adapters are included for all three.
+- **Fast.** Reading a player's state never waits or locks. Parsing a Lavalink
+  message takes well under a microsecond (see [Performance](#performance)).
+- **Reliable.** Automatic reconnect, session resume, and moving players to
+  another node when one goes down.
+- **Complete.** All Lavalink v4 REST endpoints, filters and events, plus
+  multi-node load balancing.
+
+> Requires Rust 1.97 or newer (edition 2024) and a running Lavalink v4 server.
 
 ## Install
 
+Straight-RS is not on crates.io yet, so add it from GitHub:
+
 ```toml
 [dependencies]
-straight-rs = "0.1"
-# optional features: serenity | twilight | songbird | tls
-# straight-rs = { version = "0.1", features = ["twilight"] }
+straight-rs = { git = "https://github.com/anantix-network/Straight-RS" }
+tokio = { version = "1", features = ["full"] }
 ```
 
-`tls` enables `wss://`/`https://` nodes (rustls). The MSRV is Rust 1.80.
+Optional features:
+
+| Feature    | What it adds                                           |
+|------------|--------------------------------------------------------|
+| `serenity` | Convert serenity voice events for Straight-RS          |
+| `twilight` | Convert twilight voice events for Straight-RS          |
+| `songbird` | Convert songbird connection info for Straight-RS       |
+| `tls`      | Connect to `https://` / `wss://` Lavalink nodes        |
+
+```toml
+straight-rs = { git = "https://github.com/anantix-network/Straight-RS", features = ["twilight", "tls"] }
+```
 
 ## Quick start
 
-The full, compile-checked version lives in
-[`straight-rs/examples/quickstart.rs`](straight-rs/examples/quickstart.rs)
-(`cargo build -p straight-rs --examples`).
-
 ```rust
-let client = LavalinkClient::builder(UserId(bot_id))
-    .node(NodeConfig::new("127.0.0.1:2333", "youshallnotpass"))
-    .strategy(Strategy::LeastPenalty)
-    .build()
-    .await?;
-client.wait_ready(std::time::Duration::from_secs(10)).await?;
+use straight_rs::{
+    ChannelId, GuildId, LavalinkClient, LoadResult, NodeConfig, UserId,
+    VoiceServerUpdate, VoiceStateUpdate,
+};
 
-client.voice_state_update(guild_id, VoiceStateUpdate { channel_id: Some(channel), session_id }).await?;
-client.voice_server_update(guild_id, VoiceServerUpdate { token, endpoint: Some(endpoint) }).await?;
+#[tokio::main]
+async fn main() -> straight_rs::Result<()> {
+    // 1. Connect to your Lavalink server.
+    let client = LavalinkClient::builder(UserId(YOUR_BOT_ID))
+        .node(NodeConfig::new("127.0.0.1:2333", "youshallnotpass"))
+        .build()
+        .await?;
+    client.wait_ready(std::time::Duration::from_secs(10)).await?;
 
-if let LoadResult::Search(tracks) = client.load("ytsearch:never gonna give you up").await? {
-    if let Some(track) = tracks.first() {
-        client.player(guild_id).play(track).await?;
+    // 2. Tell Straight-RS which voice channel the bot joined.
+    //    (These values come from your Discord library, see the next section.)
+    let guild = GuildId(GUILD_ID);
+    client.voice_state_update(guild, VoiceStateUpdate {
+        channel_id: Some(ChannelId(CHANNEL_ID)),
+        session_id,
+    }).await?;
+    client.voice_server_update(guild, VoiceServerUpdate {
+        token,
+        endpoint: Some(endpoint),
+    }).await?;
+
+    // 3. Search for a track and play it.
+    if let LoadResult::Search(tracks) = client.load("ytsearch:never gonna give you up").await? {
+        if let Some(track) = tracks.first() {
+            client.player(guild).play(track).await?;
+        }
     }
+    Ok(())
 }
-let mut events = client.events();
 ```
 
-## Wiring your Discord library
+A complete, compiling version is in
+[`straight-rs/examples/quickstart.rs`](straight-rs/examples/quickstart.rs).
 
-Lavalink needs the bot's own voice data. Feed the bot's voice events into the
-client:
+## Connecting your Discord library
 
-- Forward the bot's own `VOICE_STATE_UPDATE` to `client.voice_state_update(guild, VoiceStateUpdate { .. })`
-  and `VOICE_SERVER_UPDATE` to `client.voice_server_update(guild, VoiceServerUpdate { .. })`.
-  The two can arrive in either order; Straight-RS sends the assembled voice state to
-  the node once both halves are present. A `None` channel means the bot left; a
-  `None` endpoint means Discord's voice server is unavailable.
-- With songbird, pass its connection info to `client.voice_update(guild, VoiceState)`.
-- The `serenity`, `twilight` and `songbird` features add `straight_rs::adapters::*`
-  helpers that convert those libraries' types into the inputs above.
-- Implement the `VoiceGateway` trait (`join` / `leave`, which send gateway opcode 4)
-  and pass it to `ClientBuilder::gateway` if you want Straight-RS to join and leave
-  channels for you.
+Lavalink needs two pieces of information from Discord for each voice channel the
+bot joins. Your Discord library receives them as events; you just pass them on:
 
-## Players
+| Discord event         | Call this                       |
+|-----------------------|---------------------------------|
+| `VOICE_STATE_UPDATE`  | `client.voice_state_update(...)`  |
+| `VOICE_SERVER_UPDATE` | `client.voice_server_update(...)` |
 
-`client.player(guild)` returns a cheap, cloneable `Player` handle. Writes
-(`play`, `pause`, `seek`, `set_volume`, `set_filters`, `update`, ...) for one
-guild are sent one at a time, in call order. The synchronous getters
-(`position`, `track`, `is_paused`, `volume`, `filters`) read the locally cached
-state and never await; `snapshot()` returns the whole `PlayerSnapshot`, whose
-`filters` field is an `Arc<Filters>` (shared, not copied on every update).
-`player.fetch().await` asks the node for its current view of the player
-(`GET /v4/sessions/{id}/players/{guild}`). `destroy()` deletes the player on its
-node and forgets it locally; it completes even if the awaiting future is
-dropped, and if the node is unreachable the player is deleted when the node
-comes back with the same session.
+- Only pass events for **your own bot's** voice state, not other users'.
+- The two events can arrive in any order. Straight-RS waits until it has both,
+  then sends them to Lavalink.
+- When the bot leaves a channel (`channel_id: None`), Straight-RS removes the
+  player from Lavalink for you.
+- **songbird:** once it has a connection, pass it to `client.voice_update(...)`.
+- **serenity / twilight / songbird features:** `straight_rs::adapters::*` has
+  ready-made functions that turn each library's event types into the inputs above.
+- **Joining and leaving channels:** implement the small `VoiceGateway` trait
+  (`join` / `leave`) and pass it to `ClientBuilder::gateway`. Then
+  `player.join(channel)` and `player.leave()` work.
 
-## Events
+## Controlling playback
 
-`client.events()` returns a `tokio::sync::broadcast::Receiver<Event>` covering all
-nodes (`NodeConnected`, `NodeDisconnected`, `Ready`, `Stats`, `PlayerUpdate`, `TrackStart`, `TrackEnd`,
-`TrackException`, `TrackStuck`, `WebSocketClosed`, `PlayerMigrated`, and
-`Unknown` for plugin messages). `player.events()` yields the same stream filtered
-to one guild. The channel is bounded (`ClientBuilder::event_capacity`); a slow
-consumer receives `RecvError::Lagged(n)` telling it how many events were dropped,
-and can keep receiving afterwards.
+`client.player(guild)` gives you a cheap handle you can clone and share freely.
 
-## Resume and failover
+```rust
+let player = client.player(guild);
 
-Each node enables Lavalink session resuming with a grace period
-(`NodeConfig::resume_timeout_secs`, default 60 s) and reconnects with exponential
-backoff. If the session is resumed, players carry on. If the server reports
-`resumed = false`, Straight-RS rebuilds every player (track, position, filters,
-volume, voice state) on the new session. If a node stays down, its players are
-migrated to another node according to the balancing strategy, announced by
-`Event::PlayerMigrated { guild, from, to }`; players with no node available are
-kept and rescued when a node returns. A write to a player whose node is down (or
-that could not be migrated) moves it to a healthy node right away. Voice state
-that could not be delivered (no node ready, failed request) is kept and sent
-with the next write. Players moved away from a node are deleted there if that
-node comes back with its old session.
+player.play(&track).await?;        // start a track
+player.pause(true).await?;         // pause (false to resume)
+player.seek(30_000).await?;        // jump to 30 seconds (milliseconds)
+player.set_volume(80).await?;      // 0 to 1000, 100 is normal
+player.stop().await?;              // stop the current track
+player.destroy().await?;           // remove the player completely
+```
 
-## Configuration and shutdown
+Filters (equalizer, speed, karaoke and so on):
 
-`ClientBuilder::build` validates the configuration and returns `Error::Config`
-for settings that could never work: no nodes, `event_capacity` outside
-`1..=MAX_EVENT_CAPACITY` (2^24), a zero `ping_interval`, `ping_timeout` shorter
-than `ping_interval`, `secure = true` without the `tls` feature, or a host,
-password or client name that is not a valid header value.
+```rust
+use straight_rs::{Filters, model::Timescale};
 
-`client.shutdown()` (or dropping the last clone of the client) closes every node
-connection and cancels pending failover and restore work. Nodes then report
-`NodeStatus::Disconnected`, and every call on the client or on any `Player`
-handle returns `Error::Closed`. Players are not destroyed on the server; Lavalink
-drops them when the session's resume timeout expires.
+player.set_filters(Filters {
+    timescale: Some(Timescale { speed: Some(1.25), ..Default::default() }),
+    ..Default::default()
+}).await?;
+```
 
-## Out of scope
+Reading state is instant and never waits:
 
-- Playing audio or speaking to Discord's voice gateway yourself (Lavalink does that).
-- A Discord gateway/REST client: bring serenity, twilight, songbird, or your own.
+```rust
+player.position();   // current position in ms, kept up to date between updates
+player.track();      // the playing track, if any
+player.is_paused();
+player.volume();
+```
+
+Calls for the same server (guild) always run one at a time, in the order you
+made them, so you never get two conflicting updates racing each other.
+
+## Listening for events
+
+```rust
+let mut events = client.events();
+while let Ok(event) = events.recv().await {
+    if event.may_start_next() {
+        // a song finished: play the next one from your own queue
+    }
+}
+```
+
+- `client.events()` covers every node; `player.events()` only one guild.
+- Common events: `TrackStart`, `TrackEnd`, `TrackException`, `TrackStuck`,
+  `PlayerUpdate`, `NodeConnected`, `NodeDisconnected`, `PlayerMigrated`.
+  Plugin messages arrive as `Unknown`.
+- The channel has a fixed size (`ClientBuilder::event_capacity`). If your code is
+  too slow, `recv()` returns `RecvError::Lagged(n)` telling you how many events
+  were skipped, and you can keep going.
+
+Straight-RS does not include a queue. `TrackEnd` tells you when a song is over
+(`event.may_start_next()`); what plays next is up to your bot.
+
+## Using several Lavalink servers
+
+Add more than one `.node(...)`. New players go to the best available node.
+
+```rust
+use straight_rs::Strategy;
+
+let client = LavalinkClient::builder(UserId(bot_id))
+    .node(NodeConfig::new("lavalink-1.example.com:2333", "password"))
+    .node(NodeConfig::new("lavalink-2.example.com:2333", "password"))
+    .strategy(Strategy::LeastPenalty)   // or RoundRobin, LeastPlayers, Custom(..)
+    .build()
+    .await?;
+```
+
+## What happens when something goes wrong
+
+You don't have to handle reconnecting yourself.
+
+- **Connection drops:** Straight-RS reconnects with increasing delays and asks
+  Lavalink to resume the old session, so music keeps playing.
+- **Lavalink restarted and forgot the session:** every player is rebuilt on the
+  new session with its track, position, volume, filters and voice state.
+- **A node stays down** (longer than `NodeConfig::failover_grace`, 10 seconds by
+  default): its players move to another node and you get
+  `Event::PlayerMigrated { guild, from, to }`.
+- **No node is available:** players are kept and picked up again as soon as a
+  node comes back. Calls made in the meantime return `Error::NoNode`.
+
+## Settings and errors
+
+`ClientBuilder::build()` returns `Error::Config` for settings that can never
+work, for example no nodes, an `event_capacity` of 0, `secure = true` without the
+`tls` feature, or a host or password that is not valid in an HTTP header.
+
+`client.shutdown()` (or dropping the last copy of the client) closes all
+connections. After that, calls return `Error::Closed`. Lavalink removes the
+players on its own once the resume timeout passes.
+
+## Not included
+
+- A Discord library. Use serenity, twilight, songbird or your own.
 - A track queue or playlist manager.
-- Lavalink v3 and earlier.
+- Lavalink v3 or older.
 
 ## Performance
 
-`cargo bench -p straight-rs` (criterion, release profile, one run on the
-development machine):
+Measured with `cargo bench -p straight-rs` on the development machine:
 
-| Benchmark | Time |
-|---|---|
-| parse `playerUpdate` | ~0.42 µs |
-| parse `stats` | ~0.97 µs |
-| pick over 16 nodes (`LeastPenalty`) | ~14.6 ns |
-| position `interpolate` | ~1.9 ns |
-| `PlayerSnapshot::position_now` | ~18 ns |
-| apply a `playerUpdate` to a player (`apply_update`) | ~202 ns |
+| What                                     | Time     |
+|------------------------------------------|----------|
+| Parse a `playerUpdate` message           | ~0.42 µs |
+| Parse a `stats` message                  | ~0.97 µs |
+| Pick the best of 16 nodes                | ~14.6 ns |
+| Apply a `playerUpdate` to a player       | ~202 ns  |
+| Read a player's current position         | ~18 ns   |
 
-Numbers vary by machine; rerun the benches to compare on yours.
+Your numbers will differ; run the benchmarks to compare.
 
-## Testing
+## Development
 
-`cargo test --workspace` runs unit and integration tests against an in-process
-mock Lavalink. An opt-in suite against a real server:
+```sh
+cargo test --workspace --all-features   # tests run against a built-in mock Lavalink
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo bench -p straight-rs              # benchmarks
+```
+
+To also test against a real server:
 
 ```sh
 docker run -p 2333:2333 -e SERVER_PORT=2333 ghcr.io/lavalink-devs/lavalink:4
 cargo test -p straight-rs --features e2e -- --ignored
 ```
+
+The crate layout:
+
+- `straight-rs`: the client (this is what you depend on).
+- `straight-rs-model`: all Lavalink data types. Re-exported as `straight_rs::model`.
 
 ## License
 

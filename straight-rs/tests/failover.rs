@@ -118,7 +118,7 @@ async fn timer_of_earlier_outage_does_not_migrate_during_a_new_outage() {
     next_event(&mut rx, |e| matches!(e, Event::NodeConnected { .. })).await;
     tokio::time::sleep_until(t0 + Duration::from_millis(1000)).await;
     a.kill(); // outage 2 starts at ~1000ms; its grace ends at ~3000ms
-              // Outage 1's timer fires at ~2000ms with the node down again.
+    // Outage 1's timer fires at ~2000ms with the node down again.
     tokio::time::sleep_until(t0 + Duration::from_millis(2600)).await;
     assert_eq!(p.node_index(), Some(0));
     assert!(b.requests_matching("PATCH", G).is_empty());

@@ -1,6 +1,6 @@
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use straight_rs_model::Stats;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,8 +75,8 @@ pub fn pick(strategy: &Strategy, ready: &[NodeView], rr: &AtomicUsize) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
     use straight_rs_model::Stats;
 
     fn stats(players: u32, load: f64, fs: Option<(i64, i64)>) -> Stats {

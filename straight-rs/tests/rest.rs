@@ -152,10 +152,11 @@ async fn in_flight_is_released_when_request_is_dropped() {
     let mut cfg = NodeConfig::new(m.host(), "pw");
     cfg.request_timeout = Duration::from_millis(50);
     let r = RestClient::new(&cfg, "t");
-    assert!(r
-        .update_player("s", GuildId(1), &UpdatePlayer::default(), false)
-        .await
-        .is_err());
+    assert!(
+        r.update_player("s", GuildId(1), &UpdatePlayer::default(), false)
+            .await
+            .is_err()
+    );
     eventually(Duration::from_secs(2), || {
         m.state.in_flight.load(std::sync::atomic::Ordering::SeqCst) == 0
     })

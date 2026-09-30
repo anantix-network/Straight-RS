@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use straight_rs_model::*;
 
 pub const TRACK: &str = r#"{"encoded":"QAAA","info":{"identifier":"dQw4w9WgXcQ","isSeekable":true,"author":"RickAstleyVEVO","length":212000,"isStream":false,"position":0,"title":"Never Gonna Give You Up","uri":"https://www.youtube.com/watch?v=dQw4w9WgXcQ","artworkUrl":"https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg","isrc":null,"sourceName":"youtube"},"pluginInfo":{},"userData":{}}"#;
@@ -148,10 +148,12 @@ fn stats_with_and_without_frame_stats() {
     assert!(s.frame_stats.is_none());
     let mut v: Value = serde_json::from_str(&base("null")).unwrap();
     v.as_object_mut().unwrap().remove("frameStats");
-    assert!(serde_json::from_value::<Stats>(v)
-        .unwrap()
-        .frame_stats
-        .is_none());
+    assert!(
+        serde_json::from_value::<Stats>(v)
+            .unwrap()
+            .frame_stats
+            .is_none()
+    );
 }
 
 #[test]

@@ -1,11 +1,12 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 use straight_rs::__bench::PlayerCell;
-use straight_rs::balancer::{pick, NodeView, Strategy};
+use straight_rs::PlayerSnapshot;
+use straight_rs::balancer::{NodeView, Strategy, pick};
 use straight_rs::model::{Player, PlayerState, WsMessage};
 use straight_rs::position::interpolate;
-use straight_rs::PlayerSnapshot;
 
 const PLAYER_UPDATE: &str = r#"{"op":"playerUpdate","guildId":"123456789012345678","state":{"time":1700000000000,"position":123456,"connected":true,"ping":12}}"#;
 const STATS: &str = r#"{"op":"stats","players":120,"playingPlayers":80,"uptime":123456,"memory":{"free":1,"used":2,"allocated":3,"reservable":4},"cpu":{"cores":8,"systemLoad":0.3,"lavalinkLoad":0.1},"frameStats":{"sent":6000,"nulled":3,"deficit":-2}}"#;

@@ -6,7 +6,7 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering::SeqCst};
@@ -183,13 +183,17 @@ async fn ws_session(s: Arc<MockState>, mut socket: WebSocket) {
         s.players.lock().unwrap().clear();
     }
     let ready = json!({"op": "ready", "resumed": resumed, "sessionId": s.session_id});
-    if socket.send(Message::Text(ready.to_string())).await.is_err() {
+    if socket
+        .send(Message::Text(ready.to_string().into()))
+        .await
+        .is_err()
+    {
         return;
     }
     loop {
         tokio::select! {
             m = rx.recv() => match m {
-                Ok(Push::Text(t)) => { if socket.send(Message::Text(t)).await.is_err() { break; } }
+                Ok(Push::Text(t)) => { if socket.send(Message::Text(t.into())).await.is_err() { break; } }
                 Ok(Push::Close) | Err(broadcast::error::RecvError::Closed) => break,
                 Err(_) => {}
             },
