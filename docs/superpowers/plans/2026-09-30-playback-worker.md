@@ -174,14 +174,14 @@ unset SDKROOT; git verify-commit HEAD
 
 - [ ] **Step 1: Scaffold the worker package and resolve its dependency graph**
 
-Add `crates/straight-rs-worker` to root workspace members; add the workspace `straight-rs = { path = "crates/straight-rs", version = "0.1.0" }` dependency; create its manifest, `src/lib.rs`, `src/config.rs`, `src/error.rs`, and `tests/common/{fake_gateway,mock_lavalink}.rs`. Declare `serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "rustls_backend"], optional = true }`; declare `twilight-gateway = { version = "0.17.1", optional = true }`, `twilight-http = { version = "0.17.1", optional = true }`, and `twilight-model = { version = "0.17", optional = true }`. Define `serenity = ["dep:serenity", "straight-rs/serenity"]` and `twilight = ["dep:twilight-gateway", "dep:twilight-http", "dep:twilight-model", "straight-rs/twilight"]`. Add runtime dependencies for imported crates (`axum`, `serde`, `serde_json`, `thiserror`, `tokio`, `tracing`, `straight-rs`); add `tower`/`http-body-util` as test dependencies. Declare empty `config` and `error` modules in `lib.rs` so the targeted test reaches a missing-type compile failure rather than failing to find a module.
+Add `crates/straight-rs-worker` to root workspace members; add the workspace `straight-rs = { path = "crates/straight-rs", version = "0.1.0" }` dependency; create its manifest, `src/lib.rs`, `src/config.rs`, `src/error.rs`, and `tests/common/{fake_gateway,mock_lavalink}.rs`. Declare `serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "rustls_backend"], optional = true }`; declare `twilight-gateway = { version = "0.17.1", optional = true }`, `twilight-http = { version = "0.17.1", optional = true }`, and `twilight-model = { version = "0.17", optional = true }`. Define `serenity = ["dep:serenity", "straight-rs/serenity"]`, `twilight = ["dep:twilight-gateway", "dep:twilight-http", "dep:twilight-model", "straight-rs/twilight"]`, and `test-support = []`. Add runtime dependencies for imported crates (`axum`, `serde`, `serde_json`, `subtle`, `thiserror`, `tokio`, `tracing`, `straight-rs`); add `tower`/`http-body-util` and Tokio `test-util` as test dependencies. Add `signal` and `rt-multi-thread` to workspace Tokio features for the host example and runtime. Declare the `worker-serenity` and `queue-plugin` example targets and the `worker-client-probe` binary target (gated by `test-support`) now so parallel agents do not need to edit manifests. Declare empty `config` and `error` modules in `lib.rs` so the targeted test reaches a missing-type compile failure rather than failing to find a module.
 
 Run: `unset SDKROOT; cargo check -p straight-rs-worker`
 Expected: PASS with the empty library and updated lockfile; this establishes a runnable test target before adding RED tests.
 
 - [ ] **Step 2: Add failing tests for config validation and secret redaction**
 
-In worker `src/config.rs` unit tests, assert that empty Discord token, empty API bearer token, invalid remote-bind configuration, and empty Lavalink node list return `WorkerError::Config`; assert debug formatting is redacted. In the existing Straight-RS config tests, assert that `NodeConfig`'s Debug output redacts its password; the existing derived `Debug` currently prints the Lavalink password, so replace it with a manual redacted implementation without changing the struct's public fields:
+In worker `src/config.rs` unit tests, assert that empty Discord token, empty API bearer token, invalid remote-bind configuration, and empty Lavalink node list return `WorkerError::Config`; assert debug formatting is redacted:
 
 ```rust
 #[test]
@@ -189,14 +189,6 @@ fn secret_debug_is_redacted() {
     let secret = SecretString::new("test-token-value");
     assert_eq!(format!("{secret:?}"), "SecretString([REDACTED])");
     assert!(!format!("{secret:?}").contains("test-token-value"));
-}
-
-#[test]
-fn node_config_debug_redacts_password() {
-    let config = straight_rs::NodeConfig::new("localhost:2333", "lavalink-password");
-    let debug = format!("{config:?}");
-    assert!(!debug.contains("lavalink-password"));
-    assert!(debug.contains("[REDACTED]"));
 }
 ```
 
@@ -244,14 +236,26 @@ Implement `SecretString` with a private `Box<str>`, redacted `Debug`, and an exp
 
 - [ ] **Step 4: Add failing fake-driver tests for voice ownership**
 
-`tests/gateway.rs` uses the shared fake `GatewayDriver` with bounded Tokio channels. Assert `VoiceGateway::join(guild, channel)` sends one `SetVoiceState` with `Some(channel)` and waits for its oneshot acknowledgement; assert `leave(guild)` sends `None`; assert a closed driver channel returns a typed error rather than hanging. Assert a simulated `VoiceState` event is relayed to the worker event receiver. In `crates/straight-rs/src/config.rs`, replace derived `Debug` with a manual implementation that retains host/TLS/timeouts but prints `password: "[REDACTED]"`.
+`tests/gateway.rs` uses the shared fake `GatewayDriver` with bounded Tokio channels. Assert `VoiceGateway::join(guild, channel)` sends one `SetVoiceState` with `Some(channel)` and waits for its oneshot acknowledgement; assert `leave(guild)` sends `None`; assert a closed driver channel returns a typed error rather than hanging. Assert a simulated `VoiceState` event is relayed to the worker event receiver. Add this regression test to `crates/straight-rs/src/config.rs`'s existing test module:
+
+```rust
+#[test]
+fn node_config_debug_redacts_password() {
+    let config = NodeConfig::new("localhost:2333", "lavalink-password");
+    let debug = format!("{config:?}");
+    assert!(!debug.contains("lavalink-password"));
+    assert!(debug.contains("[REDACTED]"));
+}
+```
+
+Run `unset SDKROOT; cargo test -p straight-rs --lib config::tests::node_config_debug_redacts_password`; expected RED is an assertion failure because derived `Debug` exposes the password.
 
 Run: `unset SDKROOT; cargo test -p straight-rs-worker --test gateway --locked`
 Expected: FAIL because `GatewayVoiceProxy` has not yet been implemented, while the config/error/Gateway message types compile.
 
 - [ ] **Step 5: Implement the Gateway proxy and freeze adapter contracts**
 
-Implement `GatewayVoiceProxy` using bounded `mpsc::Sender::send` and a oneshot reply under a finite configured deadline. Add `SerenityGatewayDriver::new() -> Self` and `TwilightGatewayDriver::new() -> Self` public constructor/type contracts and empty module stubs; each implements `GatewayDriver`, owns the Gateway connection, filters using the supplied `bot_user_id`, forwards voice events to the worker, and sends opcode 4 through that same owner. Serenity implementation uses the client/gateway feature. Twilight implementation uses `twilight-http` to obtain recommended shard metadata and supervises the configured `twilight-gateway::Shard` stream. The seven-agent wave implements the two adapter source files against these frozen contracts, inspecting the locked Serenity 0.12.5 source and resolved Twilight 0.17.1 sources before method calls.
+Implement `GatewayVoiceProxy` using bounded `mpsc::Sender::send` and a oneshot reply under a finite configured deadline. Replace `NodeConfig`'s derived `Debug` with a manual implementation that retains host/TLS/timeouts but prints `password: "[REDACTED]"`. Add `SerenityGatewayDriver::new() -> Self` and `TwilightGatewayDriver::new() -> Self` public constructor/type contracts and empty module stubs; each implements `GatewayDriver`, owns the Gateway connection, filters using the supplied `bot_user_id`, forwards voice events to the worker, and sends opcode 4 through that same owner. Serenity implementation uses the client/gateway feature. Twilight implementation uses `twilight-http` to obtain recommended shard metadata and supervises the configured `twilight-gateway::Shard` stream. The seven-agent wave implements the two adapter source files against these frozen contracts, inspecting the locked Serenity 0.12.5 source and resolved Twilight 0.17.1 sources before method calls.
 
 ```bash
 unset SDKROOT; cargo check -p straight-rs-worker --no-default-features --locked
@@ -262,6 +266,7 @@ unset SDKROOT; cargo check -p straight-rs-worker --no-default-features --locked
 ```bash
 unset SDKROOT; cargo test -p straight-rs-worker --test gateway --locked
 unset SDKROOT; cargo test -p straight-rs-worker --lib config::tests --locked
+unset SDKROOT; cargo test -p straight-rs --lib config::tests --locked
 unset SDKROOT; git add Cargo.toml Cargo.lock crates/straight-rs-worker crates/straight-rs/src/config.rs
 unset SDKROOT; git diff --cached --check
 unset SDKROOT; git commit -S -m "feat: add playback worker gateway boundary"
@@ -321,7 +326,7 @@ unset SDKROOT; git verify-commit HEAD
 - Create/modify: `crates/straight-rs-worker/src/auth.rs` (auth agent)
 - Create/modify: `crates/straight-rs-worker/src/api.rs` (route agent)
 - Create: `crates/straight-rs-worker/tests/auth.rs` and `tests/api.rs`
-- Integration-only: `Cargo.toml`, `crates/straight-rs-worker/Cargo.toml`, `src/lib.rs`, `src/runtime.rs`, `src/error.rs` (integrator owns these; API agents do not edit them)
+- Integration-only: `src/lib.rs`, `src/runtime.rs`, `src/error.rs` (integrator owns these; API agents do not edit them)
 
 **Interfaces:**
 - `GET /healthz`, `GET /readyz`, `GET /v1/guilds/{guild_id}/player`.
@@ -350,7 +355,7 @@ Expected: FAIL until routes and auth middleware exist.
 
 - [ ] **Step 2: Implement auth, limits, and typed request/response DTOs**
 
-Add Axum 0.8, tower test utilities, and `subtle` as workspace dependencies. Apply an authentication middleware to the complete router before route dispatch; compare bearer bytes with `subtle::ConstantTimeEq` and never log them. Apply `DefaultBodyLimit::max(config.max_body_bytes)`, per-client-IP request rate limiting with a bounded in-memory table (reject unseen peers with `429` when the table is at capacity), and finite handler deadlines (`504` on deadline). Reject API tokens shorter than 32 bytes at config validation. Default `bind_addr` to `127.0.0.1:8080`; refuse non-loopback binds unless explicitly enabled, and still require bearer auth. In router tests, add `ConnectInfo<SocketAddr>` explicitly; production `serve_on()` uses `into_make_service_with_connect_info::<SocketAddr>()`.
+Use the dependencies predeclared by Task 2. Apply an authentication middleware to the complete router before route dispatch; compare bearer bytes with `subtle::ConstantTimeEq` and never log them. Apply `DefaultBodyLimit::max(config.max_body_bytes)`, per-client-IP request rate limiting with a bounded in-memory table (reject unseen peers with `429` when the table is at capacity), and finite handler deadlines (`504` on deadline). Reject API tokens shorter than 32 bytes at config validation. Default `bind_addr` to `127.0.0.1:8080`; refuse non-loopback binds unless explicitly enabled, and still require bearer auth. In router tests, add `ConnectInfo<SocketAddr>` explicitly; production `serve_on()` uses `into_make_service_with_connect_info::<SocketAddr>()`.
 
 Define DTOs with `#[serde(deny_unknown_fields)]` for mutating routes. Validate `volume <= 1000` and seek values before calling Straight-RS. Serialize a public `PlayerView` from `Player::snapshot()` fields and `VoiceStateStore`, computing current position with `position_now()`; never serialize `Instant`, `Track::user_data`, or voice credentials.
 
@@ -483,7 +488,7 @@ unset SDKROOT; git verify-commit HEAD
 - Process-test agent creates: `crates/straight-rs-worker/tests/process.rs` and `src/bin/worker-client-probe.rs` (test-only target, gated with `required-features = ["test-support"]`).
 - Serenity-adapter agent creates: `crates/straight-rs-worker/examples/worker-serenity.rs`.
 - Docs/CI agent modifies: `README.md` and `.github/workflows/ci.yml`.
-- Integration-only: `crates/straight-rs-worker/Cargo.toml` (integrator declares binary/feature targets).
+- Target declarations are predeclared in Task 2; agent-owned source files must not edit package manifests.
 
 **Interfaces:**
 - Produces a runnable example process that owns one Serenity Gateway connection and the Lavalink client, plus a child command-client probe used only by the process test.
