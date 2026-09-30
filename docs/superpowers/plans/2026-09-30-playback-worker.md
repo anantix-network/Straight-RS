@@ -4,7 +4,7 @@
 
 **Goal:** Add a pullable Rust worker crate that owns the Discord Gateway/Lavalink playback runtime independently of the command bot, with a secure control API and a bounded, statically registered plugin system.
 
-**Architecture:** Move the existing packages under `crates/` without changing their package names, then add `straight-rs-worker` as a library/service package. A dedicated worker process owns the bot Gateway session and `LavalinkClient`; the application process controls it through loopback-by-default authenticated HTTP. Gateway drivers and trusted Rust plugins are adapters around the worker core; plugin callbacks run on bounded supervised tasks, outside the audio/Gateway event loops.
+**Architecture:** Move the existing packages under `crates/` without changing their package names, then add `straight-rs-worker` as a library/service package. A dedicated worker process owns the bot Gateway session and `LavalinkClient`; the application process controls it through loopback-by-default authenticated HTTP. Gateway drivers and trusted Rust plugins are adapters around the worker core; compliant non-blocking async plugin callbacks run on bounded supervised tasks, outside the audio/Gateway event loops. A synchronously blocking hook violates the plugin contract and can delay or starve Tokio tasks on the shared executor; hard preemption requires out-of-scope process isolation.
 
 **Tech Stack:** Rust 2024 / MSRV 1.97; existing Tokio + Straight-RS; Axum 0.8 for HTTP; optional Serenity 0.12 and Twilight Gateway/Model 0.17 integrations; serde/serde_json, tracing, thiserror, tower utilities, and standard-library synchronization where sufficient.
 
@@ -18,7 +18,7 @@
 - Control API listener defaults to `127.0.0.1`; every endpoint requires bearer authentication.
 - Credentials and raw voice tokens are never logged, exposed to plugins, or persisted by the worker.
 - Plugins are statically linked trusted Rust code; no dynamic library loading or plugin-owned HTTP routes in this version.
-- Plugin event queues and callback durations are bounded; plugin faults must not terminate playback or other plugins.
+- Plugin event queues are bounded. Compliant non-blocking async callbacks have cooperative deadlines and are independently supervised; their faults must not terminate playback or other plugins. A synchronously blocking hook violates the plugin contract and can delay or starve worker and other-plugin work on the shared Tokio executor; hard preemption requires process isolation, which is out of scope.
 - Do not push. Every commit uses `git commit -S` and is verified with `git verify-commit HEAD`.
 - This environment has a stale `SDKROOT`; prefix Cargo/Git shell commands with `unset SDKROOT;`.
 
@@ -27,7 +27,7 @@
 1. Worker/application lifetime confusion: dropping or restarting an HTTP client must not call `leave`, `stop`, or `destroy`; test a real child command-client process exiting while the worker remains queryable.
 2. Discord voice protocol event ordering and identity: ignore other users and forward both voice events even when `VOICE_SERVER_UPDATE` arrives first; test both orders and channel `None`.
 3. Auth/config boundary: missing, malformed, empty, and wrong bearer tokens, non-loopback binds, oversized bodies, invalid IDs, and over-rate traffic must fail closed with stable responses.
-4. Plugin overload/failure: full queue, hanging callback, startup error, and panic must produce observable unhealthy/lagged status without stalling the Lavalink/Gateway event loops.
+4. Plugin overload/failure: for hooks complying with the non-blocking async contract, full queue, hanging callback, startup error, and panic must produce observable unhealthy/lagged status without stalling the Lavalink/Gateway event loops. A synchronously blocking, non-compliant hook can starve Tokio work, so in-process deadlines and supervision do not promise isolation from it; hard preemption is out of scope.
 5. Secret leakage: formatted errors, logs, debug output, API responses, and plugin events must not contain Discord/Lavalink/API credentials or raw voice tokens.
 
 ---
@@ -453,7 +453,7 @@ impl WorkerContext {
 
 - [ ] **Step 1: Write failing plugin lifecycle tests**
 
-Create recording plugins and assert: registration order determines startup order; event callbacks receive cloned events; shutdown order is reverse registration; required startup failure fails worker build; optional startup failure leaves the worker running and marks that plugin unhealthy; one panicking plugin is marked unhealthy without stopping the worker or a second plugin; a yielding async callback that does not complete hits its cooperative deadline; filling one plugin's bounded channel reports lag for that plugin only; the health endpoint includes plugin status but never plugin secrets. Plugin hooks must not block synchronously: deadlines/cancellation apply only while Tokio can schedule and poll a hook. Hard preemption would require process isolation, outside this trusted in-process plugin design.
+Create recording plugins and assert: registration order determines startup order; event callbacks receive cloned events; shutdown order is reverse registration; required startup failure fails worker build; optional startup failure leaves the worker running and marks that plugin unhealthy; one panicking plugin is marked unhealthy without stopping the worker or a second compliant plugin; a yielding async callback that does not complete hits its cooperative deadline; filling one plugin's bounded channel reports lag for that plugin only; the health endpoint includes plugin status but never plugin secrets. Plugin hooks must not block synchronously: deadlines/cancellation apply only while Tokio can schedule and poll a hook. A synchronously blocking, non-compliant hook can delay or starve shared Tokio tasks, so in-process supervision cannot guarantee isolation from it. Hard preemption requires process isolation, outside this trusted in-process plugin design.
 
 Run: `unset SDKROOT; cargo test -p straight-rs-worker --test plugins --locked`
 Expected: FAIL until plugin registry/supervisor is wired into runtime.
