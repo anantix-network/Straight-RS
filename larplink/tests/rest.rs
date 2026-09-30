@@ -94,3 +94,24 @@ async fn timeout_is_reported() {
     let e = r.update_player("s", GuildId(1), &UpdatePlayer::default(), false).await.unwrap_err();
     assert!(matches!(e, Error::Timeout));
 }
+
+#[tokio::test]
+async fn kill_severs_keepalive_connections() {
+    let m = Mock::start().await;
+    let r = rest(&m);
+    assert_eq!(r.version().await.unwrap(), "4.0.8"); // pooled keep-alive connection
+    m.kill();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(r.version().await.is_err());
+}
+
+#[tokio::test]
+async fn in_flight_is_released_when_request_is_dropped() {
+    let m = Mock::start().await;
+    m.state.patch_delay_ms.store(300, std::sync::atomic::Ordering::SeqCst);
+    let mut cfg = NodeConfig::new(m.host(), "pw");
+    cfg.request_timeout = Duration::from_millis(50);
+    let r = RestClient::new(&cfg, "t");
+    assert!(r.update_player("s", GuildId(1), &UpdatePlayer::default(), false).await.is_err());
+    eventually(Duration::from_secs(2), || m.state.in_flight.load(std::sync::atomic::Ordering::SeqCst) == 0).await;
+}

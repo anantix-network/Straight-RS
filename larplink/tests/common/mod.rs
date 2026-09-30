@@ -47,6 +47,7 @@ pub struct Mock {
     pub addr: SocketAddr,
     pub state: Arc<MockState>,
     server: tokio::task::JoinHandle<()>,
+    kill: tokio::sync::watch::Sender<bool>,
 }
 
 pub fn track_json(encoded: &str) -> Value {
@@ -87,10 +88,9 @@ impl Mock {
             }
         };
         let addr = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
-        });
-        Mock { addr, state, server }
+        let (kill, kill_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(accept_loop(listener, app, kill_rx));
+        Mock { addr, state, server, kill }
     }
 
     pub fn host(&self) -> String {
@@ -104,6 +104,7 @@ impl Mock {
     }
     /// Stops accepting connections and drops the websocket.
     pub fn kill(&self) {
+        let _ = self.kill.send(true);
         self.server.abort();
         self.close_ws();
     }
@@ -118,6 +119,30 @@ impl Mock {
             .into_iter()
             .filter(|r| r.method == method && r.path.starts_with(path_prefix))
             .collect()
+    }
+}
+
+async fn accept_loop(listener: tokio::net::TcpListener, app: Router, kill: tokio::sync::watch::Receiver<bool>) {
+    loop {
+        let Ok((stream, _)) = listener.accept().await else { continue };
+        let svc = hyper_util::service::TowerToHyperService::new(app.clone());
+        let mut kill = kill.clone();
+        tokio::spawn(async move {
+            let conn = hyper::server::conn::http1::Builder::new()
+                .serve_connection(hyper_util::rt::TokioIo::new(stream), svc)
+                .with_upgrades();
+            tokio::select! {
+                _ = conn => {}
+                _ = kill.wait_for(|k| *k) => {}
+            }
+        });
+    }
+}
+
+struct InFlight<'a>(&'a AtomicU32);
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, SeqCst);
     }
 }
 
@@ -186,13 +211,13 @@ async fn rest_handler(State(s): State<Arc<MockState>>, method: Method, uri: Uri,
     match (method.as_str(), segs.as_slice()) {
         ("PATCH", ["v4", "sessions", _, "players", gid]) => {
             let now = s.in_flight.fetch_add(1, SeqCst) + 1;
+            let _guard = InFlight(&s.in_flight);
             s.max_in_flight.fetch_max(now, SeqCst);
             let delay = s.patch_delay_ms.load(SeqCst);
             if delay > 0 {
                 tokio::time::sleep(Duration::from_millis(u64::from(delay))).await;
             }
             let out = merge_player(&s, gid, &body_json);
-            s.in_flight.fetch_sub(1, SeqCst);
             Json(out).into_response()
         }
         ("DELETE", ["v4", "sessions", _, "players", gid]) => {
